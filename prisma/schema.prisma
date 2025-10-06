@@ -1,0 +1,283 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================
+// Enums
+// =====================
+
+enum Role {
+  client
+  driver
+  admin
+}
+
+enum RoomTypeName {
+  SINGLE
+  DOUBLE
+  DELUXE
+  SUITE
+}
+
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CANCELLED
+}
+
+enum CurrencyCode {
+  usd
+  pkr
+}
+
+enum PaymentStatus {
+  requires_payment
+  completed
+  refunded
+}
+
+enum DisputeStatus {
+  pending
+  resolved
+  rejected
+}
+
+enum CancellationActor {
+  client
+  driver
+  admin
+}
+
+// =====================
+// Core Tables
+// =====================
+
+model User {
+  id            Int      @id @default(autoincrement())
+  full_name     String
+  email         String   @unique
+  password_hash String
+  role          Role
+  region        String
+  created_at    DateTime @default(now())
+
+  // Relations
+  driver        Driver?
+  admin         Admin?
+  hotelBookings HotelBooking[]        @relation("UserHotelBookings")
+  carBookings   CarBooking[]          @relation("UserCarBookings")
+  payments      PaymentTransaction[]
+  notifications Notification[]
+  recognitions  MonumentRecognition[]
+}
+
+model Admin {
+  id         Int      @id @default(autoincrement())
+  user_id    Int      @unique
+  created_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model Driver {
+  id                Int      @id @default(autoincrement())
+  user_id           Int      @unique
+  is_verified       Boolean  @default(false)
+  stripe_account_id String?  @unique
+  created_at        DateTime @default(now())
+
+  user User  @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  cars Car[]
+}
+
+model Hotel {
+  id          Int      @id @default(autoincrement())
+  name        String
+  city        String
+  region      String
+  avg_rating  Decimal? @db.Decimal(3, 2)
+  is_active   Boolean  @default(true)
+  images_json Json?
+  created_at  DateTime @default(now())
+
+  roomTypes     HotelRoomType[]
+  hotelBookings HotelBooking[]
+
+  @@index([region, avg_rating])
+}
+
+model HotelRoomType {
+  id            Int          @id @default(autoincrement())
+  hotel_id      Int
+  name          RoomTypeName
+  max_occupancy Int
+  total_rooms   Int
+  base_price    Decimal      @db.Decimal(10, 2)
+  created_at    DateTime     @default(now())
+
+  hotel         Hotel          @relation(fields: [hotel_id], references: [id], onDelete: Cascade)
+  hotelBookings HotelBooking[]
+
+  @@index([hotel_id])
+  @@index([hotel_id, name])
+}
+
+model Car {
+  id           Int      @id @default(autoincrement())
+  driver_id    Int
+  make         String
+  model        String
+  seats        Int
+  rate_per_day Decimal  @db.Decimal(10, 2)
+  images_json  Json?
+  is_active    Boolean  @default(true)
+  created_at   DateTime @default(now())
+
+  driver      Driver       @relation(fields: [driver_id], references: [id], onDelete: Cascade)
+  carBookings CarBooking[]
+
+  @@index([driver_id])
+}
+
+// =====================
+// Bookings & Payments (separated)
+// =====================
+
+model HotelBooking {
+  id           Int           @id @default(autoincrement())
+  user_id      Int
+  hotel_id     Int
+  room_type_id Int
+  quantity     Int
+  check_in     DateTime      @db.Date
+  check_out    DateTime      @db.Date
+  status       BookingStatus
+  total_amount Decimal       @db.Decimal(10, 2)
+  currency     CurrencyCode
+  created_at   DateTime      @default(now())
+  updated_at   DateTime      @updatedAt
+
+  user         User                 @relation("UserHotelBookings", fields: [user_id], references: [id], onDelete: Cascade)
+  hotel        Hotel                @relation(fields: [hotel_id], references: [id], onDelete: Cascade)
+  room_type    HotelRoomType        @relation(fields: [room_type_id], references: [id])
+  payments     PaymentTransaction[]
+  dispute      Dispute?
+  cancellation BookingCancellation?
+
+  @@index([user_id, created_at])
+  @@index([status])
+  @@index([hotel_id, check_in])
+}
+
+model CarBooking {
+  id           Int           @id @default(autoincrement())
+  user_id      Int
+  car_id       Int
+  quantity     Int
+  check_in     DateTime      @db.Date
+  check_out    DateTime      @db.Date
+  status       BookingStatus
+  total_amount Decimal       @db.Decimal(10, 2)
+  currency     CurrencyCode
+  created_at   DateTime      @default(now())
+  updated_at   DateTime      @updatedAt
+
+  user         User                 @relation("UserCarBookings", fields: [user_id], references: [id], onDelete: Cascade)
+  car          Car                  @relation(fields: [car_id], references: [id], onDelete: Cascade)
+  payments     PaymentTransaction[]
+  dispute      Dispute?
+  cancellation BookingCancellation?
+
+  @@index([user_id, created_at])
+  @@index([status])
+  @@index([car_id, check_in])
+}
+
+model PaymentTransaction {
+  id                       Int           @id @default(autoincrement())
+  booking_hotel_id         Int?
+  booking_car_id           Int?
+  user_id                  Int
+  amount                   Decimal       @db.Decimal(10, 2)
+  currency                 CurrencyCode
+  stripe_payment_intent_id String
+  stripe_charge_id         String?
+  application_fee_amount   Decimal       @db.Decimal(10, 2)
+  status                   PaymentStatus
+  created_at               DateTime      @default(now())
+
+  bookingHotel HotelBooking? @relation(fields: [booking_hotel_id], references: [id], onDelete: Cascade)
+  bookingCar   CarBooking?   @relation(fields: [booking_car_id], references: [id], onDelete: Cascade)
+  user         User          @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([booking_hotel_id])
+  @@index([booking_car_id])
+  @@index([user_id])
+  @@index([status, created_at])
+}
+
+// =====================
+// Monuments, Disputes, Notifications
+// =====================
+
+model MonumentRecognition {
+  id               Int      @id @default(autoincrement())
+  user_id          Int
+  image_url        String
+  name             String
+  confidence       Decimal  @db.Decimal(5, 4)
+  wiki_snippet     String?
+  raw_payload_json Json?
+  created_at       DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, created_at])
+}
+
+model Dispute {
+  id               Int               @id @default(autoincrement())
+  booking_hotel_id Int?              @unique
+  booking_car_id   Int?              @unique
+  raised_by        CancellationActor
+  description      String
+  attachments_json Json?
+  status           DisputeStatus
+  created_at       DateTime          @default(now())
+  resolved_at      DateTime?
+
+  bookingHotel HotelBooking? @relation(fields: [booking_hotel_id], references: [id], onDelete: Cascade)
+  bookingCar   CarBooking?   @relation(fields: [booking_car_id], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+model BookingCancellation {
+  id               Int               @id @default(autoincrement())
+  booking_hotel_id Int?              @unique
+  booking_car_id   Int?              @unique
+  cancelled_by     CancellationActor
+  reason           String
+  refund_amount    Decimal           @db.Decimal(10, 2)
+  created_at       DateTime          @default(now())
+
+  bookingHotel HotelBooking? @relation(fields: [booking_hotel_id], references: [id], onDelete: Cascade)
+  bookingCar   CarBooking?   @relation(fields: [booking_car_id], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id           Int      @id @default(autoincrement())
+  user_id      Int
+  type         String
+  payload_json Json?
+  sent_at      DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, sent_at])
+}
