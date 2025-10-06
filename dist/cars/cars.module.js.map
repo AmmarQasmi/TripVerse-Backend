@@ -1,0 +1,1 @@
+{"version":3,"file":"cars.module.js","sourceRoot":"","sources":["../../src/cars/cars.module.ts"],"names":[],"mappings":";;;;;;;;;AAAA,2CAAwC;AACxC,uDAAmD;AACnD,iDAA6C;AAMtC,IAAM,UAAU,GAAhB,MAAM,UAAU;CAAG,CAAA;AAAb,gCAAU;qBAAV,UAAU;IAJtB,IAAA,eAAM,EAAC;QACP,WAAW,EAAE,CAAC,gCAAc,CAAC;QAC7B,SAAS,EAAE,CAAC,0BAAW,CAAC;KACxB,CAAC;GACW,UAAU,CAAG"}
