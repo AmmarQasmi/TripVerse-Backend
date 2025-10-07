@@ -12,20 +12,32 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.RolesGuard = void 0;
 const common_1 = require("@nestjs/common");
 const core_1 = require("@nestjs/core");
+const client_1 = require("@prisma/client");
+const roles_decorator_1 = require("../decorators/roles.decorator");
 let RolesGuard = class RolesGuard {
     constructor(reflector) {
         this.reflector = reflector;
     }
     canActivate(context) {
-        const requiredRoles = this.reflector.getAllAndOverride('roles', [
+        const requiredRoles = this.reflector.getAllAndOverride(roles_decorator_1.ROLES_KEY, [
             context.getHandler(),
             context.getClass(),
         ]);
-        if (!requiredRoles) {
+        if (!requiredRoles || requiredRoles.length === 0) {
             return true;
         }
         const request = context.switchToHttp().getRequest();
         const user = request.user;
+        if (!user) {
+            throw new common_1.ForbiddenException('User not authenticated');
+        }
+        if (user.role === client_1.Role.admin) {
+            return true;
+        }
+        const hasRole = requiredRoles.includes(user.role);
+        if (!hasRole) {
+            throw new common_1.ForbiddenException(`Access denied. Required roles: ${requiredRoles.join(', ')}. Your role: ${user.role}`);
+        }
         return true;
     }
 };

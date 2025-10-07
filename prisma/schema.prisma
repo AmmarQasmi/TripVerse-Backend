@@ -67,6 +67,7 @@ model User {
   created_at    DateTime @default(now())
 
   // Relations
+  client        Client?
   driver        Driver?
   admin         Admin?
   hotelBookings HotelBooking[]        @relation("UserHotelBookings")
@@ -74,6 +75,14 @@ model User {
   payments      PaymentTransaction[]
   notifications Notification[]
   recognitions  MonumentRecognition[]
+}
+
+model Client {
+  id         Int      @id @default(autoincrement())
+  user_id    Int      @unique
+  created_at DateTime @default(now())
+
+  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
 }
 
 model Admin {
@@ -85,11 +94,23 @@ model Admin {
 }
 
 model Driver {
-  id                Int      @id @default(autoincrement())
-  user_id           Int      @unique
-  is_verified       Boolean  @default(false)
-  stripe_account_id String?  @unique
-  created_at        DateTime @default(now())
+  id                Int     @id @default(autoincrement())
+  user_id           Int     @unique
+  is_verified       Boolean @default(false)
+  stripe_account_id String? @unique
+
+  // Verification documents for admin review
+  license_image_url     String?
+  rating_screenshot_url String?
+  rating_platform       String? // e.g., "uber", "careem", "indrive"
+  existing_rating       Decimal? @db.Decimal(3, 2) // e.g., 4.50
+
+  // Admin verification notes
+  verification_notes String?
+  verified_at        DateTime?
+
+  created_at DateTime @default(now())
+  updated_at DateTime @default(now()) @updatedAt
 
   user User  @relation(fields: [user_id], references: [id], onDelete: Cascade)
   cars Car[]
