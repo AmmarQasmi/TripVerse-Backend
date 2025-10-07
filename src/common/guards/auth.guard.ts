@@ -1,25 +1,19 @@
-import { Injectable, CanActivate, ExecutionContext } from '@nestjs/common';
-import { Observable } from 'rxjs';
+import { Injectable, ExecutionContext } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 
 /**
- * Authentication Guard
+ * JWT Authentication Guard
  * 
- * This guard will be used to protect routes that require authentication.
- * It checks for valid JWT tokens in the request headers.
+ * This guard validates JWT tokens using Passport JWT strategy.
+ * It checks for valid JWT tokens in the Authorization header.
  * 
  * Usage:
- * @UseGuards(AuthGuard)
+ * @UseGuards(JwtAuthGuard)
  * @Controller('protected-route')
  */
 @Injectable()
-export class AuthGuard implements CanActivate {
-  canActivate(
-    context: ExecutionContext,
-  ): boolean | Promise<boolean> | Observable<boolean> {
-    const request = context.switchToHttp().getRequest();
-    
-    // TODO: Implement JWT token validation
-    // For now, return true to allow all requests
-    return true;
+export class JwtAuthGuard extends AuthGuard('jwt') {
+  canActivate(context: ExecutionContext) {
+    return super.canActivate(context);
   }
 }
