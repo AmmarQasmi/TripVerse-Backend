@@ -23,17 +23,35 @@ let DriversService = class DriversService {
         if (!driver) {
             throw new common_1.NotFoundException('Driver profile not found');
         }
-        if (dto.existing_rating < 4.0) {
-            throw new common_1.BadRequestException('Existing rating must be 4.0 or higher for verification');
+        for (const rating of dto.ratings) {
+            if (rating.rating < 4.0) {
+                throw new common_1.BadRequestException(`Rating for ${rating.platform} must be 4.0 or higher for verification`);
+            }
         }
-        const updatedDriver = await this.prisma.driver.update({
+        await this.prisma.$transaction(async (tx) => {
+            for (const doc of dto.documents) {
+                await tx.driverDocument.create({
+                    data: {
+                        driver_id: driver.id,
+                        document_type: doc.document_type,
+                        document_url: doc.document_url,
+                        status: 'pending',
+                    },
+                });
+            }
+            for (const rating of dto.ratings) {
+                await tx.driverRating.create({
+                    data: {
+                        driver_id: driver.id,
+                        platform: rating.platform,
+                        rating: rating.rating,
+                        screenshot_url: rating.screenshot_url,
+                    },
+                });
+            }
+        });
+        const updatedDriver = await this.prisma.driver.findUnique({
             where: { id: driver.id },
-            data: {
-                license_image_url: dto.license_image_url,
-                rating_screenshot_url: dto.rating_screenshot_url,
-                rating_platform: dto.rating_platform,
-                existing_rating: dto.existing_rating,
-            },
             include: {
                 user: {
                     select: {
@@ -41,7 +59,15 @@ let DriversService = class DriversService {
                         email: true,
                         full_name: true,
                         role: true,
+                        status: true,
+                        city: true,
                     },
+                },
+                documents: {
+                    orderBy: { uploaded_at: 'desc' },
+                },
+                ratings: {
+                    orderBy: { created_at: 'desc' },
                 },
             },
         });
@@ -53,12 +79,20 @@ let DriversService = class DriversService {
     async verifyDriver(driverId, dto) {
         const driver = await this.prisma.driver.findUnique({
             where: { id: driverId },
+            include: {
+                documents: true,
+                ratings: true,
+            },
         });
         if (!driver) {
             throw new common_1.NotFoundException('Driver not found');
         }
-        if (!driver.license_image_url || !driver.rating_screenshot_url) {
+        if (driver.documents.length === 0 || driver.ratings.length === 0) {
             throw new common_1.BadRequestException('Driver has not submitted verification documents yet');
+        }
+        const hasLicense = driver.documents.some((doc) => doc.document_type === 'license');
+        if (!hasLicense) {
+            throw new common_1.BadRequestException('Driver must submit a license document');
         }
         const updatedDriver = await this.prisma.driver.update({
             where: { id: driverId },
@@ -73,10 +107,39 @@ let DriversService = class DriversService {
                         id: true,
                         email: true,
                         full_name: true,
+                        status: true,
+                        city: true,
                     },
+                },
+                documents: {
+                    orderBy: { uploaded_at: 'desc' },
+                },
+                ratings: {
+                    orderBy: { created_at: 'desc' },
                 },
             },
         });
+        if (dto.is_verified) {
+            await this.prisma.driverDocument.updateMany({
+                where: {
+                    driver_id: driverId,
+                    status: 'pending',
+                },
+                data: {
+                    status: 'approved',
+                    reviewed_at: new Date(),
+                },
+            });
+            await this.prisma.driverRating.updateMany({
+                where: {
+                    driver_id: driverId,
+                    verified_at: null,
+                },
+                data: {
+                    verified_at: new Date(),
+                },
+            });
+        }
         return {
             message: dto.is_verified ? 'Driver verified successfully' : 'Driver verification rejected',
             driver: updatedDriver,
@@ -91,10 +154,24 @@ let DriversService = class DriversService {
                         id: true,
                         email: true,
                         full_name: true,
-                        region: true,
+                        status: true,
+                        city: true,
                     },
                 },
-                cars: true,
+                cars: {
+                    include: {
+                        carModel: true,
+                        images: {
+                            orderBy: { display_order: 'asc' },
+                        },
+                    },
+                },
+                documents: {
+                    orderBy: { uploaded_at: 'desc' },
+                },
+                ratings: {
+                    orderBy: { created_at: 'desc' },
+                },
             },
         });
         if (!driver) {
@@ -106,8 +183,11 @@ let DriversService = class DriversService {
         return this.prisma.driver.findMany({
             where: {
                 is_verified: false,
-                license_image_url: { not: null },
-                rating_screenshot_url: { not: null },
+                documents: {
+                    some: {
+                        status: 'pending',
+                    },
+                },
             },
             include: {
                 user: {
@@ -115,8 +195,17 @@ let DriversService = class DriversService {
                         id: true,
                         email: true,
                         full_name: true,
-                        region: true,
+                        status: true,
+                        city: true,
                     },
+                },
+                documents: {
+                    where: { status: 'pending' },
+                    orderBy: { uploaded_at: 'desc' },
+                },
+                ratings: {
+                    where: { verified_at: null },
+                    orderBy: { created_at: 'desc' },
                 },
             },
             orderBy: {
@@ -133,10 +222,26 @@ let DriversService = class DriversService {
                         id: true,
                         email: true,
                         full_name: true,
-                        region: true,
+                        status: true,
+                        city: true,
                     },
                 },
-                cars: true,
+                cars: {
+                    include: {
+                        carModel: true,
+                        images: {
+                            orderBy: { display_order: 'asc' },
+                        },
+                    },
+                },
+                documents: {
+                    where: { status: 'approved' },
+                    orderBy: { uploaded_at: 'desc' },
+                },
+                ratings: {
+                    where: { verified_at: { not: null } },
+                    orderBy: { created_at: 'desc' },
+                },
             },
             orderBy: {
                 verified_at: 'desc',

@@ -11,6 +11,7 @@ const common_1 = require("@nestjs/common");
 const prisma_module_1 = require("./prisma/prisma.module");
 const auth_module_1 = require("./auth/auth.module");
 const users_module_1 = require("./users/users.module");
+const cities_module_1 = require("./cities/cities.module");
 const hotels_module_1 = require("./hotels/hotels.module");
 const cars_module_1 = require("./cars/cars.module");
 const drivers_module_1 = require("./drivers/drivers.module");
@@ -28,6 +29,7 @@ exports.AppModule = AppModule = __decorate([
             prisma_module_1.PrismaModule,
             auth_module_1.AuthModule,
             users_module_1.UsersModule,
+            cities_module_1.CitiesModule,
             hotels_module_1.HotelsModule,
             cars_module_1.CarsModule,
             drivers_module_1.DriversModule,

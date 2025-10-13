@@ -25,7 +25,7 @@ export class AuthService {
 			password: signupDto.password,
 			full_name: signupDto.full_name,
 			role: signupDto.role,
-			region: signupDto.region,
+			city_id: signupDto.city_id,
 		});
 
 		// Generate JWT token
@@ -39,7 +39,12 @@ export class AuthService {
 				email: user.email,
 				full_name: user.full_name,
 				role: user.role,
-				region: user.region,
+				status: user.status,
+				city: {
+					id: user.city.id,
+					name: user.city.name,
+					region: user.city.region,
+				},
 			},
 		};
 	}
@@ -49,6 +54,14 @@ export class AuthService {
 		const user = await this.usersService.findByEmail(loginDto.email);
 		if (!user) {
 			throw new UnauthorizedException('Invalid credentials');
+		}
+
+		// Check if account is banned or inactive
+		if (user.status === 'banned') {
+			throw new UnauthorizedException('Your account has been banned');
+		}
+		if (user.status === 'inactive') {
+			throw new UnauthorizedException('Your account is inactive');
 		}
 
 		// Validate password
@@ -72,7 +85,12 @@ export class AuthService {
 				email: user.email,
 				full_name: user.full_name,
 				role: user.role,
-				region: user.region,
+				status: user.status,
+				city: {
+					id: user.city.id,
+					name: user.city.name,
+					region: user.city.region,
+				},
 			},
 		};
 	}
@@ -87,7 +105,12 @@ export class AuthService {
 			email: user.email,
 			full_name: user.full_name,
 			role: user.role,
-			region: user.region,
+			status: user.status,
+			city: {
+				id: user.city.id,
+				name: user.city.name,
+				region: user.city.region,
+			},
 			created_at: user.created_at,
 		};
 	}

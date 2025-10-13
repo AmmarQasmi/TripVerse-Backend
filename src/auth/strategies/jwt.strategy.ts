@@ -27,13 +27,23 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 				email: true,
 				full_name: true,
 				role: true,
-				region: true,
+				status: true,
+				city_id: true,
 				created_at: true,
+				city: true,
 			},
 		});
 
 		if (!user) {
 			throw new UnauthorizedException('User not found');
+		}
+
+		// Check if account is banned or inactive
+		if (user.status === 'banned') {
+			throw new UnauthorizedException('Your account has been banned');
+		}
+		if (user.status === 'inactive') {
+			throw new UnauthorizedException('Your account is inactive');
 		}
 
 		return user;

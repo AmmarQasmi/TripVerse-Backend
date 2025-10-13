@@ -22,6 +22,7 @@ let UsersService = class UsersService {
         return this.prisma.user.findUnique({
             where: { email },
             include: {
+                city: true,
                 client: true,
                 driver: true,
                 admin: true,
@@ -36,8 +37,10 @@ let UsersService = class UsersService {
                 email: true,
                 full_name: true,
                 role: true,
-                region: true,
+                status: true,
+                city_id: true,
                 created_at: true,
+                city: true,
                 client: true,
                 driver: true,
                 admin: true,
@@ -52,15 +55,17 @@ let UsersService = class UsersService {
                 password_hash: hashedPassword,
                 full_name: data.full_name,
                 role: data.role,
-                region: data.region,
+                city_id: data.city_id,
             },
             select: {
                 id: true,
                 email: true,
                 full_name: true,
                 role: true,
-                region: true,
+                status: true,
+                city_id: true,
                 created_at: true,
+                city: true,
             },
         });
         if (data.role === client_1.Role.client) {
