@@ -1,5 +1,6 @@
-import { IsEmail, IsEnum, IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsEnum, IsNotEmpty, IsString, MinLength, IsInt } from 'class-validator';
 import { Role } from '@prisma/client';
+import { Type } from 'class-transformer';
 
 export class SignupDto {
 	@IsNotEmpty()
@@ -20,7 +21,8 @@ export class SignupDto {
 	role!: Role;
 
 	@IsNotEmpty()
-	@IsString()
-	region!: string;
+	@IsInt()
+	@Type(() => Number)
+	city_id!: number;
 }
 

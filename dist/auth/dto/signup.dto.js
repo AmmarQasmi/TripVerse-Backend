@@ -12,6 +12,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SignupDto = void 0;
 const class_validator_1 = require("class-validator");
 const client_1 = require("@prisma/client");
+const class_transformer_1 = require("class-transformer");
 class SignupDto {
 }
 exports.SignupDto = SignupDto;
@@ -38,7 +39,8 @@ __decorate([
 ], SignupDto.prototype, "role", void 0);
 __decorate([
     (0, class_validator_1.IsNotEmpty)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SignupDto.prototype, "region", void 0);
+    (0, class_validator_1.IsInt)(),
+    (0, class_transformer_1.Type)(() => Number),
+    __metadata("design:type", Number)
+], SignupDto.prototype, "city_id", void 0);
 //# sourceMappingURL=signup.dto.js.map

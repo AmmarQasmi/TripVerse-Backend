@@ -11,26 +11,52 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SubmitVerificationDto = void 0;
 const class_validator_1 = require("class-validator");
+const class_transformer_1 = require("class-transformer");
+const client_1 = require("@prisma/client");
+class DocumentUploadDto {
+}
+__decorate([
+    (0, class_validator_1.IsNotEmpty)(),
+    (0, class_validator_1.IsEnum)(client_1.DocumentType),
+    __metadata("design:type", String)
+], DocumentUploadDto.prototype, "document_type", void 0);
+__decorate([
+    (0, class_validator_1.IsNotEmpty)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], DocumentUploadDto.prototype, "document_url", void 0);
+class RatingUploadDto {
+}
+__decorate([
+    (0, class_validator_1.IsNotEmpty)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], RatingUploadDto.prototype, "platform", void 0);
+__decorate([
+    (0, class_validator_1.IsNotEmpty)(),
+    (0, class_validator_1.IsNumber)(),
+    (0, class_validator_1.Min)(4.0),
+    (0, class_validator_1.Max)(5.0),
+    __metadata("design:type", Number)
+], RatingUploadDto.prototype, "rating", void 0);
+__decorate([
+    (0, class_validator_1.IsNotEmpty)(),
+    (0, class_validator_1.IsString)(),
+    __metadata("design:type", String)
+], RatingUploadDto.prototype, "screenshot_url", void 0);
 class SubmitVerificationDto {
 }
 exports.SubmitVerificationDto = SubmitVerificationDto;
 __decorate([
-    (0, class_validator_1.IsNotEmpty)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SubmitVerificationDto.prototype, "license_image_url", void 0);
+    (0, class_validator_1.IsArray)(),
+    (0, class_validator_1.ValidateNested)({ each: true }),
+    (0, class_transformer_1.Type)(() => DocumentUploadDto),
+    __metadata("design:type", Array)
+], SubmitVerificationDto.prototype, "documents", void 0);
 __decorate([
-    (0, class_validator_1.IsNotEmpty)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SubmitVerificationDto.prototype, "rating_screenshot_url", void 0);
-__decorate([
-    (0, class_validator_1.IsNotEmpty)(),
-    (0, class_validator_1.IsString)(),
-    __metadata("design:type", String)
-], SubmitVerificationDto.prototype, "rating_platform", void 0);
-__decorate([
-    (0, class_validator_1.IsNotEmpty)(),
-    __metadata("design:type", Number)
-], SubmitVerificationDto.prototype, "existing_rating", void 0);
+    (0, class_validator_1.IsArray)(),
+    (0, class_validator_1.ValidateNested)({ each: true }),
+    (0, class_transformer_1.Type)(() => RatingUploadDto),
+    __metadata("design:type", Array)
+], SubmitVerificationDto.prototype, "ratings", void 0);
 //# sourceMappingURL=submit-verification.dto.js.map

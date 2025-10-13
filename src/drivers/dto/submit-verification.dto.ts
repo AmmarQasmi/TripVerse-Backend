@@ -1,19 +1,42 @@
-import { IsNotEmpty, IsString } from 'class-validator';
+import { IsNotEmpty, IsString, IsEnum, IsNumber, Min, Max, IsArray, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
+import { DocumentType } from '@prisma/client';
+
+class DocumentUploadDto {
+	@IsNotEmpty()
+	@IsEnum(DocumentType)
+	document_type!: DocumentType;
+
+	@IsNotEmpty()
+	@IsString()
+	document_url!: string;
+}
+
+class RatingUploadDto {
+	@IsNotEmpty()
+	@IsString()
+	platform!: string; // "uber", "careem", "indrive"
+
+	@IsNotEmpty()
+	@IsNumber()
+	@Min(4.0)
+	@Max(5.0)
+	rating!: number; // Must be 4.0 or higher
+
+	@IsNotEmpty()
+	@IsString()
+	screenshot_url!: string;
+}
 
 export class SubmitVerificationDto {
-	@IsNotEmpty()
-	@IsString()
-	license_image_url!: string;
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => DocumentUploadDto)
+	documents!: DocumentUploadDto[];
 
-	@IsNotEmpty()
-	@IsString()
-	rating_screenshot_url!: string;
-
-	@IsNotEmpty()
-	@IsString()
-	rating_platform!: string; // "uber", "careem", "indrive"
-
-	@IsNotEmpty()
-	existing_rating!: number; // Must be 4.0 or higher
+	@IsArray()
+	@ValidateNested({ each: true })
+	@Type(() => RatingUploadDto)
+	ratings!: RatingUploadDto[];
 }
 

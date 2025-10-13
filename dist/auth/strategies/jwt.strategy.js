@@ -31,12 +31,20 @@ let JwtStrategy = class JwtStrategy extends (0, passport_1.PassportStrategy)(pas
                 email: true,
                 full_name: true,
                 role: true,
-                region: true,
+                status: true,
+                city_id: true,
                 created_at: true,
+                city: true,
             },
         });
         if (!user) {
             throw new common_1.UnauthorizedException('User not found');
+        }
+        if (user.status === 'banned') {
+            throw new common_1.UnauthorizedException('Your account has been banned');
+        }
+        if (user.status === 'inactive') {
+            throw new common_1.UnauthorizedException('Your account is inactive');
         }
         return user;
     }

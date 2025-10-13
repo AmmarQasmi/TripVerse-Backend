@@ -1,4 +1,4 @@
-import { Role } from '@prisma/client';
+import { Role, AccountStatus } from '@prisma/client';
 
 export class AuthResponseDto {
 	access_token!: string;
@@ -7,7 +7,12 @@ export class AuthResponseDto {
 		email: string;
 		full_name: string;
 		role: Role;
-		region: string;
+		status: AccountStatus;
+		city: {
+			id: number;
+			name: string;
+			region: string;
+		};
 	};
 }
 

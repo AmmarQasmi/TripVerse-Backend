@@ -28,7 +28,7 @@ let AuthService = class AuthService {
             password: signupDto.password,
             full_name: signupDto.full_name,
             role: signupDto.role,
-            region: signupDto.region,
+            city_id: signupDto.city_id,
         });
         const payload = { sub: user.id, email: user.email, role: user.role };
         const access_token = this.jwtService.sign(payload);
@@ -39,7 +39,12 @@ let AuthService = class AuthService {
                 email: user.email,
                 full_name: user.full_name,
                 role: user.role,
-                region: user.region,
+                status: user.status,
+                city: {
+                    id: user.city.id,
+                    name: user.city.name,
+                    region: user.city.region,
+                },
             },
         };
     }
@@ -47,6 +52,12 @@ let AuthService = class AuthService {
         const user = await this.usersService.findByEmail(loginDto.email);
         if (!user) {
             throw new common_1.UnauthorizedException('Invalid credentials');
+        }
+        if (user.status === 'banned') {
+            throw new common_1.UnauthorizedException('Your account has been banned');
+        }
+        if (user.status === 'inactive') {
+            throw new common_1.UnauthorizedException('Your account is inactive');
         }
         const isPasswordValid = await this.usersService.validatePassword(loginDto.password, user.password_hash);
         if (!isPasswordValid) {
@@ -61,7 +72,12 @@ let AuthService = class AuthService {
                 email: user.email,
                 full_name: user.full_name,
                 role: user.role,
-                region: user.region,
+                status: user.status,
+                city: {
+                    id: user.city.id,
+                    name: user.city.name,
+                    region: user.city.region,
+                },
             },
         };
     }
@@ -75,7 +91,12 @@ let AuthService = class AuthService {
             email: user.email,
             full_name: user.full_name,
             role: user.role,
-            region: user.region,
+            status: user.status,
+            city: {
+                id: user.city.id,
+                name: user.city.name,
+                region: user.city.region,
+            },
             created_at: user.created_at,
         };
     }

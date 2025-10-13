@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
+import { CitiesModule } from './cities/cities.module';
 import { HotelsModule } from './hotels/hotels.module';
 import { CarsModule } from './cars/cars.module';
 import { DriversModule } from './drivers/drivers.module';
@@ -16,6 +17,7 @@ import { AdminModule } from './admin/admin.module';
 		PrismaModule,
 		AuthModule,
 		UsersModule,
+		CitiesModule,
 		HotelsModule,
 		CarsModule,
 		DriversModule,

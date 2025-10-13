@@ -17,6 +17,12 @@ enum Role {
   admin
 }
 
+enum AccountStatus {
+  active
+  inactive
+  banned
+}
+
 enum RoomTypeName {
   SINGLE
   DOUBLE
@@ -53,20 +59,59 @@ enum CancellationActor {
   admin
 }
 
+enum DocumentType {
+  license
+  cnic
+  vehicle_registration
+  insurance
+  other
+}
+
+enum DocumentStatus {
+  pending
+  approved
+  rejected
+}
+
 // =====================
 // Core Tables
 // =====================
 
+model City {
+  id         Int      @id @default(autoincrement())
+  name       String   @unique
+  region     String
+  created_at DateTime @default(now())
+
+  users  User[]
+  hotels Hotel[]
+
+  @@index([region])
+}
+
+model CarModel {
+  id         Int      @id @default(autoincrement())
+  make       String
+  model      String
+  created_at DateTime @default(now())
+
+  cars Car[]
+
+  @@unique([make, model])
+}
+
 model User {
-  id            Int      @id @default(autoincrement())
+  id            Int           @id @default(autoincrement())
   full_name     String
-  email         String   @unique
+  email         String        @unique
   password_hash String
   role          Role
-  region        String
-  created_at    DateTime @default(now())
+  city_id       Int
+  status        AccountStatus @default(active)
+  created_at    DateTime      @default(now())
 
   // Relations
+  city          City                  @relation(fields: [city_id], references: [id])
   client        Client?
   driver        Driver?
   admin         Admin?
@@ -75,6 +120,10 @@ model User {
   payments      PaymentTransaction[]
   notifications Notification[]
   recognitions  MonumentRecognition[]
+
+  @@index([city_id])
+  @@index([status])
+  @@index([role, status])
 }
 
 model Client {
@@ -94,42 +143,81 @@ model Admin {
 }
 
 model Driver {
-  id                Int     @id @default(autoincrement())
-  user_id           Int     @unique
-  is_verified       Boolean @default(false)
-  stripe_account_id String? @unique
-
-  // Verification documents for admin review
-  license_image_url     String?
-  rating_screenshot_url String?
-  rating_platform       String? // e.g., "uber", "careem", "indrive"
-  existing_rating       Decimal? @db.Decimal(3, 2) // e.g., 4.50
-
-  // Admin verification notes
+  id                 Int       @id @default(autoincrement())
+  user_id            Int       @unique
+  is_verified        Boolean   @default(false)
+  stripe_account_id  String?   @unique
   verification_notes String?
   verified_at        DateTime?
+  created_at         DateTime  @default(now())
+  updated_at         DateTime  @default(now()) @updatedAt
 
-  created_at DateTime @default(now())
-  updated_at DateTime @default(now()) @updatedAt
+  user      User             @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  cars      Car[]
+  ratings   DriverRating[]
+  documents DriverDocument[]
 
-  user User  @relation(fields: [user_id], references: [id], onDelete: Cascade)
-  cars Car[]
+  @@index([is_verified])
+}
+
+model DriverRating {
+  id             Int       @id @default(autoincrement())
+  driver_id      Int
+  platform       String // e.g., "uber", "careem", "indrive"
+  rating         Decimal   @db.Decimal(3, 2)
+  screenshot_url String?
+  verified_at    DateTime?
+  created_at     DateTime  @default(now())
+
+  driver Driver @relation(fields: [driver_id], references: [id], onDelete: Cascade)
+
+  @@index([driver_id])
+}
+
+model DriverDocument {
+  id               Int            @id @default(autoincrement())
+  driver_id        Int
+  document_type    DocumentType
+  document_url     String
+  status           DocumentStatus @default(pending)
+  rejection_reason String?
+  uploaded_at      DateTime       @default(now())
+  reviewed_at      DateTime?
+  reviewed_by      Int? // Admin user_id who reviewed
+
+  driver Driver @relation(fields: [driver_id], references: [id], onDelete: Cascade)
+
+  @@index([driver_id])
+  @@index([status])
 }
 
 model Hotel {
-  id          Int      @id @default(autoincrement())
-  name        String
-  city        String
-  region      String
-  avg_rating  Decimal? @db.Decimal(3, 2)
-  is_active   Boolean  @default(true)
-  images_json Json?
-  created_at  DateTime @default(now())
+  id         Int      @id @default(autoincrement())
+  name       String
+  city_id    Int
+  avg_rating Decimal? @db.Decimal(3, 2)
+  is_active  Boolean  @default(true)
+  created_at DateTime @default(now())
 
+  city          City            @relation(fields: [city_id], references: [id])
+  images        HotelImage[]
   roomTypes     HotelRoomType[]
   hotelBookings HotelBooking[]
 
-  @@index([region, avg_rating])
+  @@index([city_id, avg_rating])
+  @@index([is_active])
+}
+
+model HotelImage {
+  id            Int      @id @default(autoincrement())
+  hotel_id      Int
+  image_url     String
+  display_order Int
+  created_at    DateTime @default(now())
+
+  hotel Hotel @relation(fields: [hotel_id], references: [id], onDelete: Cascade)
+
+  @@index([hotel_id, display_order])
 }
 
 model HotelRoomType {
@@ -151,18 +239,32 @@ model HotelRoomType {
 model Car {
   id           Int      @id @default(autoincrement())
   driver_id    Int
-  make         String
-  model        String
+  car_model_id Int
   seats        Int
   rate_per_day Decimal  @db.Decimal(10, 2)
-  images_json  Json?
   is_active    Boolean  @default(true)
   created_at   DateTime @default(now())
 
   driver      Driver       @relation(fields: [driver_id], references: [id], onDelete: Cascade)
+  carModel    CarModel     @relation(fields: [car_model_id], references: [id])
+  images      CarImage[]
   carBookings CarBooking[]
 
   @@index([driver_id])
+  @@index([car_model_id])
+  @@index([is_active])
+}
+
+model CarImage {
+  id            Int      @id @default(autoincrement())
+  car_id        Int
+  image_url     String
+  display_order Int
+  created_at    DateTime @default(now())
+
+  car Car @relation(fields: [car_id], references: [id], onDelete: Cascade)
+
+  @@index([car_id, display_order])
 }
 
 // =====================
@@ -267,15 +369,27 @@ model Dispute {
   booking_car_id   Int?              @unique
   raised_by        CancellationActor
   description      String
-  attachments_json Json?
   status           DisputeStatus
   created_at       DateTime          @default(now())
   resolved_at      DateTime?
 
-  bookingHotel HotelBooking? @relation(fields: [booking_hotel_id], references: [id], onDelete: Cascade)
-  bookingCar   CarBooking?   @relation(fields: [booking_car_id], references: [id], onDelete: Cascade)
+  bookingHotel HotelBooking?       @relation(fields: [booking_hotel_id], references: [id], onDelete: Cascade)
+  bookingCar   CarBooking?         @relation(fields: [booking_car_id], references: [id], onDelete: Cascade)
+  attachments  DisputeAttachment[]
 
   @@index([status])
+}
+
+model DisputeAttachment {
+  id          Int      @id @default(autoincrement())
+  dispute_id  Int
+  file_url    String
+  file_type   String
+  uploaded_at DateTime @default(now())
+
+  dispute Dispute @relation(fields: [dispute_id], references: [id], onDelete: Cascade)
+
+  @@index([dispute_id])
 }
 
 model BookingCancellation {
@@ -292,13 +406,16 @@ model BookingCancellation {
 }
 
 model Notification {
-  id           Int      @id @default(autoincrement())
-  user_id      Int
-  type         String
-  payload_json Json?
-  sent_at      DateTime @default(now())
+  id      Int       @id @default(autoincrement())
+  user_id Int
+  type    String
+  title   String
+  message String
+  sent_at DateTime  @default(now())
+  read_at DateTime?
 
   user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@index([user_id, sent_at])
+  @@index([user_id, read_at])
 }
