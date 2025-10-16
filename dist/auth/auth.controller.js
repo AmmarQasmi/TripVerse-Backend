@@ -23,15 +23,34 @@ let AuthController = class AuthController {
     constructor(authService) {
         this.authService = authService;
     }
-    async signup(signupDto) {
-        return this.authService.signup(signupDto);
-    }
-    async login(loginDto) {
-        return this.authService.login(loginDto);
-    }
-    async logout() {
+    async signup(signupDto, res) {
+        const result = await this.authService.signup(signupDto);
+        this.setAuthCookie(res, result.access_token);
         return {
-            message: 'Logged out successfully. Please remove the token from client storage.',
+            user: result.user,
+            message: 'Signup successful',
+        };
+    }
+    async login(loginDto, res) {
+        console.log('\n🔐 Login request received for:', loginDto.email);
+        const result = await this.authService.login(loginDto);
+        console.log('✅ Authentication successful, setting cookie...');
+        this.setAuthCookie(res, result.access_token);
+        console.log('🍪 Cookie set, returning response\n');
+        return {
+            user: result.user,
+            message: 'Login successful',
+        };
+    }
+    async logout(res) {
+        res.clearCookie('access_token', {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+            path: '/',
+        });
+        return {
+            message: 'Logged out successfully',
         };
     }
     async getProfile(user) {
@@ -41,28 +60,59 @@ let AuthController = class AuthController {
     health() {
         return { ok: true, service: 'auth' };
     }
+    checkCookie(req) {
+        const cookies = req.cookies;
+        const hasCookie = !!(cookies === null || cookies === void 0 ? void 0 : cookies.access_token);
+        return {
+            hasCookie,
+            cookieNames: Object.keys(cookies || {}),
+            message: hasCookie
+                ? 'Cookie is being sent correctly!'
+                : 'No cookie found - check CORS settings',
+        };
+    }
+    setAuthCookie(res, token) {
+        const isDevelopment = process.env.NODE_ENV !== 'production';
+        console.log('🍪 Setting cookie:', {
+            httpOnly: true,
+            secure: !isDevelopment,
+            sameSite: 'lax',
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+            tokenPreview: token.substring(0, 20) + '...',
+        });
+        res.cookie('access_token', token, {
+            httpOnly: true,
+            secure: false,
+            sameSite: 'lax',
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+            path: '/',
+        });
+    }
 };
 exports.AuthController = AuthController;
 __decorate([
     (0, common_1.Post)('signup'),
     __param(0, (0, common_1.Body)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [signup_dto_1.SignupDto]),
+    __metadata("design:paramtypes", [signup_dto_1.SignupDto, Object]),
     __metadata("design:returntype", Promise)
 ], AuthController.prototype, "signup", null);
 __decorate([
     (0, common_1.Post)('login'),
     (0, common_1.HttpCode)(common_1.HttpStatus.OK),
     __param(0, (0, common_1.Body)()),
+    __param(1, (0, common_1.Res)({ passthrough: true })),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", [login_dto_1.LoginDto]),
+    __metadata("design:paramtypes", [login_dto_1.LoginDto, Object]),
     __metadata("design:returntype", Promise)
 ], AuthController.prototype, "login", null);
 __decorate([
     (0, common_1.Post)('logout'),
     (0, common_1.HttpCode)(common_1.HttpStatus.OK),
+    __param(0, (0, common_1.Res)({ passthrough: true })),
     __metadata("design:type", Function),
-    __metadata("design:paramtypes", []),
+    __metadata("design:paramtypes", [Object]),
     __metadata("design:returntype", Promise)
 ], AuthController.prototype, "logout", null);
 __decorate([
@@ -79,6 +129,13 @@ __decorate([
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", void 0)
 ], AuthController.prototype, "health", null);
+__decorate([
+    (0, common_1.Get)('check-cookie'),
+    __param(0, (0, common_1.Req)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object]),
+    __metadata("design:returntype", void 0)
+], AuthController.prototype, "checkCookie", null);
 exports.AuthController = AuthController = __decorate([
     (0, common_1.Controller)('auth'),
     __metadata("design:paramtypes", [auth_service_1.AuthService])
