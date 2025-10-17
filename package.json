@@ -33,6 +33,7 @@
     "@nestjs/testing": "^10.4.20",
     "@types/bcrypt": "^6.0.0",
     "@types/cookie-parser": "^1.4.7",
+    "@types/node": "^20.19.22",
     "@types/passport-jwt": "^4.0.1",
     "prettier": "^3.3.3",
     "prisma": "^6.16.3",

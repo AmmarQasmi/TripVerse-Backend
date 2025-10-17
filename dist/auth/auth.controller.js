@@ -28,6 +28,7 @@ let AuthController = class AuthController {
         this.setAuthCookie(res, result.access_token);
         return {
             user: result.user,
+            access_token: result.access_token,
             message: 'Signup successful',
         };
     }
@@ -39,6 +40,7 @@ let AuthController = class AuthController {
         console.log('🍪 Cookie set, returning response\n');
         return {
             user: result.user,
+            access_token: result.access_token,
             message: 'Login successful',
         };
     }

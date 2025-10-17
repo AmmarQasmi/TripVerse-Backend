@@ -13,10 +13,10 @@
     "incremental": true,
     "skipLibCheck": true,
     "strict": true,
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "lib": ["es2019"],
+    "types": ["node"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist", "test", "**/*spec.ts"]
 }
-
-
