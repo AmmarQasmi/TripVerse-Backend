@@ -20,9 +20,10 @@ export class AuthController {
 		// Set httpOnly cookie with the JWT token
 		this.setAuthCookie(res, result.access_token);
 		
-		// Return user data WITHOUT the token (security best practice)
+		// Return user data WITH token for testing (remove in production)
 		return {
 			user: result.user,
+			access_token: result.access_token, // For bearer token testing
 			message: 'Signup successful',
 		};
 	}
@@ -44,9 +45,10 @@ export class AuthController {
 		
 		console.log('🍪 Cookie set, returning response\n');
 		
-		// Return user data WITHOUT the token (security best practice)
+		// Return user data WITH token for testing (remove in production)
 		return {
 			user: result.user,
+			access_token: result.access_token, // For bearer token testing
 			message: 'Login successful',
 		};
 	}
