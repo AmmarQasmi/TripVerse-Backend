@@ -3,8 +3,9 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // Port 6543 - Transaction pool (runtime)
+  directUrl = env("DIRECT_URL") // Port 5432 - Direct connection (migrations)
 }
 
 // =====================
@@ -192,20 +193,27 @@ model DriverDocument {
 }
 
 model Hotel {
-  id         Int      @id @default(autoincrement())
-  name       String
-  city_id    Int
-  avg_rating Decimal? @db.Decimal(3, 2)
-  is_active  Boolean  @default(true)
-  created_at DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  name        String
+  city_id     Int
+  description String?  @db.Text
+  address     String?
+  star_rating Int?     @default(4)
+  amenities   Json?    @default("[]")
+  is_active   Boolean  @default(true)
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
 
   city          City            @relation(fields: [city_id], references: [id])
   images        HotelImage[]
   roomTypes     HotelRoomType[]
   hotelBookings HotelBooking[]
 
-  @@index([city_id, avg_rating])
+  @@index([city_id, star_rating])
   @@index([is_active])
+  @@index([star_rating])
+  @@index([created_at])
+  @@map("hotels")
 }
 
 model HotelImage {
@@ -218,22 +226,30 @@ model HotelImage {
   hotel Hotel @relation(fields: [hotel_id], references: [id], onDelete: Cascade)
 
   @@index([hotel_id, display_order])
+  @@map("hotel_images")
 }
 
 model HotelRoomType {
   id            Int          @id @default(autoincrement())
   hotel_id      Int
   name          RoomTypeName
+  description   String?      @db.Text
   max_occupancy Int
   total_rooms   Int
   base_price    Decimal      @db.Decimal(10, 2)
+  amenities     Json?        @default("[]")
+  images        Json?        @default("[]")
+  is_active     Boolean      @default(true)
   created_at    DateTime     @default(now())
+  updated_at    DateTime     @updatedAt
 
   hotel         Hotel          @relation(fields: [hotel_id], references: [id], onDelete: Cascade)
   hotelBookings HotelBooking[]
 
   @@index([hotel_id])
   @@index([hotel_id, name])
+  @@index([base_price])
+  @@map("hotel_room_types")
 }
 
 model Car {
