@@ -10,13 +10,17 @@ exports.CarsModule = void 0;
 const common_1 = require("@nestjs/common");
 const cars_controller_1 = require("./cars.controller");
 const cars_service_1 = require("./cars.service");
+const roles_guard_1 = require("../common/guards/roles.guard");
+const auth_module_1 = require("../auth/auth.module");
 let CarsModule = class CarsModule {
 };
 exports.CarsModule = CarsModule;
 exports.CarsModule = CarsModule = __decorate([
     (0, common_1.Module)({
+        imports: [auth_module_1.AuthModule],
         controllers: [cars_controller_1.CarsController],
-        providers: [cars_service_1.CarsService],
+        providers: [cars_service_1.CarsService, roles_guard_1.RolesGuard],
+        exports: [cars_service_1.CarsService],
     })
 ], CarsModule);
 //# sourceMappingURL=cars.module.js.map

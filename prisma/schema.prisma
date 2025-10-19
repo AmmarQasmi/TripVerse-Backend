@@ -32,9 +32,13 @@ enum RoomTypeName {
 }
 
 enum BookingStatus {
-  PENDING_PAYMENT
+  PENDING_DRIVER_ACCEPTANCE
+  ACCEPTED
   CONFIRMED
+  IN_PROGRESS
+  COMPLETED
   CANCELLED
+  REJECTED
 }
 
 enum CurrencyCode {
@@ -72,6 +76,31 @@ enum DocumentStatus {
   pending
   approved
   rejected
+}
+
+enum TransmissionType {
+  manual
+  automatic
+}
+
+enum FuelType {
+  petrol
+  diesel
+  electric
+  hybrid
+}
+
+enum NotificationType {
+  booking_request
+  booking_accepted
+  booking_rejected
+  booking_confirmed
+  trip_started
+  trip_completed
+  payment_received
+  driver_verification
+  dispute_raised
+  dispute_resolved
 }
 
 // =====================
@@ -112,15 +141,17 @@ model User {
   created_at    DateTime      @default(now())
 
   // Relations
-  city          City                  @relation(fields: [city_id], references: [id])
-  client        Client?
-  driver        Driver?
-  admin         Admin?
-  hotelBookings HotelBooking[]        @relation("UserHotelBookings")
-  carBookings   CarBooking[]          @relation("UserCarBookings")
-  payments      PaymentTransaction[]
-  notifications Notification[]
-  recognitions  MonumentRecognition[]
+  city              City                  @relation(fields: [city_id], references: [id])
+  client            Client?
+  driver            Driver?
+  admin             Admin?
+  hotelBookings     HotelBooking[]        @relation("UserHotelBookings")
+  carBookings       CarBooking[]          @relation("UserCarBookings")
+  payments          PaymentTransaction[]
+  notifications     Notification[]
+  recognitions      MonumentRecognition[]
+  chatMessages      ChatMessage[]
+  reviewedDocuments DriverDocument[]      @relation("DocumentReviewer")
 
   @@index([city_id])
   @@index([status])
@@ -186,7 +217,8 @@ model DriverDocument {
   reviewed_at      DateTime?
   reviewed_by      Int? // Admin user_id who reviewed
 
-  driver Driver @relation(fields: [driver_id], references: [id], onDelete: Cascade)
+  driver   Driver @relation(fields: [driver_id], references: [id], onDelete: Cascade)
+  reviewer User?  @relation("DocumentReviewer", fields: [reviewed_by], references: [id])
 
   @@index([driver_id])
   @@index([status])
@@ -253,13 +285,20 @@ model HotelRoomType {
 }
 
 model Car {
-  id           Int      @id @default(autoincrement())
-  driver_id    Int
-  car_model_id Int
-  seats        Int
-  rate_per_day Decimal  @db.Decimal(10, 2)
-  is_active    Boolean  @default(true)
-  created_at   DateTime @default(now())
+  id                   Int              @id @default(autoincrement())
+  driver_id            Int
+  car_model_id         Int
+  seats                Int
+  base_price_per_day   Decimal          @db.Decimal(10, 2)
+  distance_rate_per_km Decimal          @db.Decimal(10, 2)
+  transmission         TransmissionType
+  fuel_type            FuelType
+  year                 Int
+  color                String?
+  license_plate        String?
+  is_active            Boolean          @default(true)
+  created_at           DateTime         @default(now())
+  updated_at           DateTime         @updatedAt
 
   driver      Driver       @relation(fields: [driver_id], references: [id], onDelete: Cascade)
   carModel    CarModel     @relation(fields: [car_model_id], references: [id])
@@ -269,6 +308,9 @@ model Car {
   @@index([driver_id])
   @@index([car_model_id])
   @@index([is_active])
+  @@index([base_price_per_day])
+  @@index([transmission])
+  @@index([fuel_type])
 }
 
 model CarImage {
@@ -314,50 +356,77 @@ model HotelBooking {
 }
 
 model CarBooking {
-  id           Int           @id @default(autoincrement())
-  user_id      Int
-  car_id       Int
-  quantity     Int
-  check_in     DateTime      @db.Date
-  check_out    DateTime      @db.Date
-  status       BookingStatus
-  total_amount Decimal       @db.Decimal(10, 2)
-  currency     CurrencyCode
-  created_at   DateTime      @default(now())
-  updated_at   DateTime      @updatedAt
+  id                 Int           @id @default(autoincrement())
+  user_id            Int
+  car_id             Int
+  pickup_location    String
+  dropoff_location   String
+  estimated_distance Decimal?      @db.Decimal(10, 2) // in km
+  start_date         DateTime      @db.Date
+  end_date           DateTime      @db.Date
+  status             BookingStatus
+  total_amount       Decimal       @db.Decimal(10, 2)
+  driver_earnings    Decimal       @db.Decimal(10, 2)
+  platform_fee       Decimal       @db.Decimal(10, 2)
+  currency           CurrencyCode
+  customer_notes     String?
+  driver_notes       String?
+  requested_at       DateTime      @default(now())
+  accepted_at        DateTime?
+  confirmed_at       DateTime?
+  started_at         DateTime?
+  completed_at       DateTime?
+  created_at         DateTime      @default(now())
+  updated_at         DateTime      @updatedAt
 
   user         User                 @relation("UserCarBookings", fields: [user_id], references: [id], onDelete: Cascade)
   car          Car                  @relation(fields: [car_id], references: [id], onDelete: Cascade)
   payments     PaymentTransaction[]
   dispute      Dispute?
   cancellation BookingCancellation?
+  chat         Chat?
 
   @@index([user_id, created_at])
   @@index([status])
-  @@index([car_id, check_in])
+  @@index([car_id, start_date])
+  @@index([start_date, end_date])
 }
 
 model PaymentTransaction {
-  id                       Int           @id @default(autoincrement())
-  booking_hotel_id         Int?
-  booking_car_id           Int?
-  user_id                  Int
-  amount                   Decimal       @db.Decimal(10, 2)
-  currency                 CurrencyCode
-  stripe_payment_intent_id String
-  stripe_charge_id         String?
-  application_fee_amount   Decimal       @db.Decimal(10, 2)
-  status                   PaymentStatus
-  created_at               DateTime      @default(now())
+  id                     Int           @id @default(autoincrement())
+  booking_hotel_id       Int?
+  booking_car_id         Int?
+  user_id                Int
+  amount                 Decimal       @db.Decimal(10, 2)
+  currency               CurrencyCode
+  application_fee_amount Decimal       @db.Decimal(10, 2)
+  status                 PaymentStatus
+  created_at             DateTime      @default(now())
 
-  bookingHotel HotelBooking? @relation(fields: [booking_hotel_id], references: [id], onDelete: Cascade)
-  bookingCar   CarBooking?   @relation(fields: [booking_car_id], references: [id], onDelete: Cascade)
-  user         User          @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  bookingHotel  HotelBooking?         @relation(fields: [booking_hotel_id], references: [id], onDelete: Cascade)
+  bookingCar    CarBooking?           @relation(fields: [booking_car_id], references: [id], onDelete: Cascade)
+  user          User                  @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  stripeDetails StripePaymentDetails?
 
   @@index([booking_hotel_id])
   @@index([booking_car_id])
   @@index([user_id])
   @@index([status, created_at])
+}
+
+model StripePaymentDetails {
+  id                       Int      @id @default(autoincrement())
+  payment_transaction_id   Int      @unique
+  stripe_payment_intent_id String
+  stripe_charge_id         String?
+  stripe_account_id        String? // Connected account ID for driver
+  created_at               DateTime @default(now())
+  updated_at               DateTime @updatedAt
+
+  paymentTransaction PaymentTransaction @relation(fields: [payment_transaction_id], references: [id], onDelete: Cascade)
+
+  @@index([stripe_payment_intent_id])
+  @@index([stripe_charge_id])
 }
 
 // =====================
@@ -422,16 +491,44 @@ model BookingCancellation {
 }
 
 model Notification {
-  id      Int       @id @default(autoincrement())
+  id      Int              @id @default(autoincrement())
   user_id Int
-  type    String
+  type    NotificationType
   title   String
   message String
-  sent_at DateTime  @default(now())
+  sent_at DateTime         @default(now())
   read_at DateTime?
 
   user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@index([user_id, sent_at])
   @@index([user_id, read_at])
+  @@index([type])
+}
+
+model Chat {
+  id         Int      @id @default(autoincrement())
+  booking_id Int      @unique
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  booking  CarBooking    @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  messages ChatMessage[]
+
+  @@index([booking_id])
+}
+
+model ChatMessage {
+  id        Int       @id @default(autoincrement())
+  chat_id   Int
+  sender_id Int
+  message   String
+  sent_at   DateTime  @default(now())
+  read_at   DateTime?
+
+  chat   Chat @relation(fields: [chat_id], references: [id], onDelete: Cascade)
+  sender User @relation(fields: [sender_id], references: [id], onDelete: Cascade)
+
+  @@index([chat_id, sent_at])
+  @@index([sender_id])
 }
