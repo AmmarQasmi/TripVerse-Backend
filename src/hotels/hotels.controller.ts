@@ -9,12 +9,17 @@ import {
 	Body,
 	ParseIntPipe,
 	UseGuards,
+	UseInterceptors,
+	UploadedFiles,
+	BadRequestException,
 } from '@nestjs/common';
+import { FilesInterceptor } from '@nestjs/platform-express';
 import { HotelsService } from './hotels.service';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '@prisma/client';
+import { imageUploadConfig } from '../common/config/multer.config';
 
 @Controller('hotels')
 export class HotelsController {
@@ -156,6 +161,47 @@ export class HotelsController {
 		@Body('imageIds') imageIds: number[],
 	) {
 		return this.hotelsService.reorderImages(hotelId, imageIds);
+	}
+
+	/**
+	 * Upload images to hotel using Cloudinary (Admin only)
+	 * POST /hotels/:hotelId/images/upload
+	 */
+	@Post(':hotelId/images/upload')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.admin)
+	@UseInterceptors(FilesInterceptor('images', 10, imageUploadConfig))
+	async uploadImages(
+		@Param('hotelId', ParseIntPipe) hotelId: number,
+		@UploadedFiles() files: any[],
+	) {
+		if (!files || files.length === 0) {
+			throw new BadRequestException('No files uploaded');
+		}
+		return this.hotelsService.uploadImages(hotelId, files);
+	}
+
+	/**
+	 * Delete hotel image from Cloudinary and database (Admin only)
+	 * DELETE /hotels/:hotelId/images/:imageId/cloudinary
+	 */
+	@Delete(':hotelId/images/:imageId/cloudinary')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.admin)
+	async removeImageWithCloudinary(
+		@Param('hotelId', ParseIntPipe) hotelId: number,
+		@Param('imageId', ParseIntPipe) imageId: number,
+	) {
+		return this.hotelsService.removeImageWithCloudinary(hotelId, imageId);
+	}
+
+	/**
+	 * Get optimized images for hotel
+	 * GET /hotels/:hotelId/images/optimized
+	 */
+	@Get(':hotelId/images/optimized')
+	async getOptimizedImages(@Param('hotelId', ParseIntPipe) hotelId: number) {
+		return this.hotelsService.getOptimizedImages(hotelId);
 	}
 
 	@Get('health')

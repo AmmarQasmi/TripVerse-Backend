@@ -14,11 +14,13 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.HotelsController = void 0;
 const common_1 = require("@nestjs/common");
+const platform_express_1 = require("@nestjs/platform-express");
 const hotels_service_1 = require("./hotels.service");
 const auth_guard_1 = require("../common/guards/auth.guard");
 const roles_guard_1 = require("../common/guards/roles.guard");
 const roles_decorator_1 = require("../common/decorators/roles.decorator");
 const client_1 = require("@prisma/client");
+const multer_config_1 = require("../common/config/multer.config");
 let HotelsController = class HotelsController {
     constructor(hotelsService) {
         this.hotelsService = hotelsService;
@@ -55,6 +57,18 @@ let HotelsController = class HotelsController {
     }
     async reorderImages(hotelId, imageIds) {
         return this.hotelsService.reorderImages(hotelId, imageIds);
+    }
+    async uploadImages(hotelId, files) {
+        if (!files || files.length === 0) {
+            throw new common_1.BadRequestException('No files uploaded');
+        }
+        return this.hotelsService.uploadImages(hotelId, files);
+    }
+    async removeImageWithCloudinary(hotelId, imageId) {
+        return this.hotelsService.removeImageWithCloudinary(hotelId, imageId);
+    }
+    async getOptimizedImages(hotelId) {
+        return this.hotelsService.getOptimizedImages(hotelId);
     }
     health() {
         return { ok: true, service: 'hotels' };
@@ -164,6 +178,34 @@ __decorate([
     __metadata("design:paramtypes", [Number, Array]),
     __metadata("design:returntype", Promise)
 ], HotelsController.prototype, "reorderImages", null);
+__decorate([
+    (0, common_1.Post)(':hotelId/images/upload'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.admin),
+    (0, common_1.UseInterceptors)((0, platform_express_1.FilesInterceptor)('images', 10, multer_config_1.imageUploadConfig)),
+    __param(0, (0, common_1.Param)('hotelId', common_1.ParseIntPipe)),
+    __param(1, (0, common_1.UploadedFiles)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, Array]),
+    __metadata("design:returntype", Promise)
+], HotelsController.prototype, "uploadImages", null);
+__decorate([
+    (0, common_1.Delete)(':hotelId/images/:imageId/cloudinary'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.admin),
+    __param(0, (0, common_1.Param)('hotelId', common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Param)('imageId', common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, Number]),
+    __metadata("design:returntype", Promise)
+], HotelsController.prototype, "removeImageWithCloudinary", null);
+__decorate([
+    (0, common_1.Get)(':hotelId/images/optimized'),
+    __param(0, (0, common_1.Param)('hotelId', common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number]),
+    __metadata("design:returntype", Promise)
+], HotelsController.prototype, "getOptimizedImages", null);
 __decorate([
     (0, common_1.Get)('health'),
     __metadata("design:type", Function),
