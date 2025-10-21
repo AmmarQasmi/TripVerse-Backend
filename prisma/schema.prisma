@@ -41,6 +41,14 @@ enum BookingStatus {
   REJECTED
 }
 
+enum HotelBookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+}
+
 enum CurrencyCode {
   usd
   pkr
@@ -330,18 +338,18 @@ model CarImage {
 // =====================
 
 model HotelBooking {
-  id           Int           @id @default(autoincrement())
+  id           Int                @id @default(autoincrement())
   user_id      Int
   hotel_id     Int
   room_type_id Int
   quantity     Int
-  check_in     DateTime      @db.Date
-  check_out    DateTime      @db.Date
-  status       BookingStatus
-  total_amount Decimal       @db.Decimal(10, 2)
+  check_in     DateTime           @db.Date
+  check_out    DateTime           @db.Date
+  status       HotelBookingStatus
+  total_amount Decimal            @db.Decimal(10, 2)
   currency     CurrencyCode
-  created_at   DateTime      @default(now())
-  updated_at   DateTime      @updatedAt
+  created_at   DateTime           @default(now())
+  updated_at   DateTime           @updatedAt
 
   user         User                 @relation("UserHotelBookings", fields: [user_id], references: [id], onDelete: Cascade)
   hotel        Hotel                @relation(fields: [hotel_id], references: [id], onDelete: Cascade)
