@@ -12,9 +12,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.HotelsService = void 0;
 const common_1 = require("@nestjs/common");
 const prisma_service_1 = require("../prisma/prisma.service");
+const cloudinary_service_1 = require("../common/cloudinary/cloudinary.service");
 let HotelsService = class HotelsService {
-    constructor(prisma) {
+    constructor(prisma, cloudinaryService) {
         this.prisma = prisma;
+        this.cloudinaryService = cloudinaryService;
     }
     async findAll(query = {}) {
         const city_id = query.city_id ? parseInt(query.city_id) : null;
@@ -355,10 +357,93 @@ let HotelsService = class HotelsService {
         })));
         return { message: 'Images reordered successfully' };
     }
+    async uploadImages(hotelId, files) {
+        const hotel = await this.prisma.hotel.findUnique({
+            where: { id: hotelId }
+        });
+        if (!hotel || !hotel.is_active) {
+            throw new common_1.NotFoundException('Hotel not found');
+        }
+        if (!files || files.length === 0) {
+            throw new common_1.BadRequestException('No files uploaded');
+        }
+        try {
+            const uploadResults = await this.cloudinaryService.uploadMultipleImages(files, 'hotels', {
+                transformation: [
+                    { width: 1200, height: 800, crop: 'fill', quality: 'auto' },
+                    { fetch_format: 'auto' }
+                ]
+            });
+            const maxOrder = await this.prisma.hotelImage.findFirst({
+                where: { hotel_id: hotelId },
+                orderBy: { display_order: 'desc' },
+            });
+            const startOrder = ((maxOrder === null || maxOrder === void 0 ? void 0 : maxOrder.display_order) || -1) + 1;
+            const imageRecords = await this.prisma.hotelImage.createMany({
+                data: uploadResults.map((result, index) => ({
+                    hotel_id: hotelId,
+                    image_url: result.secure_url,
+                    public_id: result.public_id,
+                    display_order: startOrder + index,
+                })),
+            });
+            return {
+                message: `${files.length} image(s) uploaded successfully`,
+                images: uploadResults.map((result) => ({
+                    url: result.secure_url,
+                    public_id: result.public_id,
+                })),
+            };
+        }
+        catch (error) {
+            console.error('Upload error:', error);
+            throw new common_1.BadRequestException('Failed to upload images');
+        }
+    }
+    async removeImageWithCloudinary(hotelId, imageId) {
+        const image = await this.prisma.hotelImage.findFirst({
+            where: { id: imageId, hotel_id: hotelId },
+        });
+        if (!image) {
+            throw new common_1.NotFoundException('Image not found');
+        }
+        try {
+            if (image.public_id) {
+                await this.cloudinaryService.deleteImage(image.public_id);
+            }
+            await this.prisma.hotelImage.delete({
+                where: { id: imageId },
+            });
+            return { message: 'Image deleted successfully' };
+        }
+        catch (error) {
+            console.error('Delete error:', error);
+            throw new common_1.BadRequestException('Failed to delete image');
+        }
+    }
+    async getOptimizedImages(hotelId) {
+        const images = await this.prisma.hotelImage.findMany({
+            where: { hotel_id: hotelId },
+            orderBy: { display_order: 'asc' },
+        });
+        return images.map(image => ({
+            id: image.id,
+            original: image.image_url,
+            responsive: image.public_id ?
+                this.cloudinaryService.generateResponsiveUrls(image.public_id) :
+                {
+                    thumbnail: image.image_url,
+                    medium: image.image_url,
+                    large: image.image_url,
+                    original: image.image_url
+                }
+        }));
+    }
 };
 exports.HotelsService = HotelsService;
 exports.HotelsService = HotelsService = __decorate([
     (0, common_1.Injectable)(),
-    __metadata("design:paramtypes", [prisma_service_1.PrismaService])
+    __metadata("design:paramtypes", [prisma_service_1.PrismaService,
+        cloudinary_service_1.CloudinaryService])
 ], HotelsService);
 //# sourceMappingURL=hotels.service.js.map

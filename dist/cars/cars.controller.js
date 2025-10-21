@@ -14,11 +14,13 @@ var __param = (this && this.__param) || function (paramIndex, decorator) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CarsController = void 0;
 const common_1 = require("@nestjs/common");
+const platform_express_1 = require("@nestjs/platform-express");
 const cars_service_1 = require("./cars.service");
 const auth_guard_1 = require("../common/guards/auth.guard");
 const roles_guard_1 = require("../common/guards/roles.guard");
 const roles_decorator_1 = require("../common/decorators/roles.decorator");
 const client_1 = require("@prisma/client");
+const multer_config_1 = require("../common/config/multer.config");
 let CarsController = class CarsController {
     constructor(carsService) {
         this.carsService = carsService;
@@ -88,6 +90,26 @@ let CarsController = class CarsController {
     }
     async verifyDriver(id, body) {
         return this.carsService.verifyDriverForAdmin(id, body);
+    }
+    async uploadCarImages(carId, files, req) {
+        if (!files || files.length === 0) {
+            throw new common_1.BadRequestException('No files uploaded');
+        }
+        const car = await this.carsService.findOne(carId);
+        if (car.driver.id !== req.user.id) {
+            throw new common_1.BadRequestException('You can only upload images to your own cars');
+        }
+        return this.carsService.uploadCarImages(carId, files);
+    }
+    async removeCarImageWithCloudinary(carId, imageId, req) {
+        const car = await this.carsService.findOne(carId);
+        if (car.driver.id !== req.user.id) {
+            throw new common_1.BadRequestException('You can only delete images from your own cars');
+        }
+        return this.carsService.removeCarImageWithCloudinary(carId, imageId);
+    }
+    async getOptimizedCarImages(carId) {
+        return this.carsService.getOptimizedCarImages(carId);
     }
     health() {
         return { ok: true, service: 'cars' };
@@ -256,6 +278,36 @@ __decorate([
     __metadata("design:paramtypes", [Number, Object]),
     __metadata("design:returntype", Promise)
 ], CarsController.prototype, "verifyDriver", null);
+__decorate([
+    (0, common_1.Post)(':carId/images/upload'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.driver),
+    (0, common_1.UseInterceptors)((0, platform_express_1.FilesInterceptor)('images', 10, multer_config_1.imageUploadConfig)),
+    __param(0, (0, common_1.Param)('carId', common_1.ParseIntPipe)),
+    __param(1, (0, common_1.UploadedFiles)()),
+    __param(2, (0, common_1.Request)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, Array, Object]),
+    __metadata("design:returntype", Promise)
+], CarsController.prototype, "uploadCarImages", null);
+__decorate([
+    (0, common_1.Delete)(':carId/images/:imageId/cloudinary'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.driver),
+    __param(0, (0, common_1.Param)('carId', common_1.ParseIntPipe)),
+    __param(1, (0, common_1.Param)('imageId', common_1.ParseIntPipe)),
+    __param(2, (0, common_1.Request)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, Number, Object]),
+    __metadata("design:returntype", Promise)
+], CarsController.prototype, "removeCarImageWithCloudinary", null);
+__decorate([
+    (0, common_1.Get)(':carId/images/optimized'),
+    __param(0, (0, common_1.Param)('carId', common_1.ParseIntPipe)),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number]),
+    __metadata("design:returntype", Promise)
+], CarsController.prototype, "getOptimizedCarImages", null);
 __decorate([
     (0, common_1.Get)('health'),
     __metadata("design:type", Function),

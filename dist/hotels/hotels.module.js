@@ -12,12 +12,13 @@ const hotels_controller_1 = require("./hotels.controller");
 const hotels_service_1 = require("./hotels.service");
 const roles_guard_1 = require("../common/guards/roles.guard");
 const auth_module_1 = require("../auth/auth.module");
+const cloudinary_module_1 = require("../common/cloudinary/cloudinary.module");
 let HotelsModule = class HotelsModule {
 };
 exports.HotelsModule = HotelsModule;
 exports.HotelsModule = HotelsModule = __decorate([
     (0, common_1.Module)({
-        imports: [auth_module_1.AuthModule],
+        imports: [auth_module_1.AuthModule, cloudinary_module_1.CloudinaryModule],
         controllers: [hotels_controller_1.HotelsController],
         providers: [hotels_service_1.HotelsService, roles_guard_1.RolesGuard],
     })

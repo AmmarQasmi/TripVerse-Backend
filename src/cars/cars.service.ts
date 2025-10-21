@@ -1,9 +1,13 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 
 @Injectable()
 export class CarsService {
-	constructor(private prisma: PrismaService) {}
+	constructor(
+		private prisma: PrismaService,
+		private cloudinaryService: CloudinaryService
+	) {}
 
 	/**
 	 * Search available cars with filters
@@ -1446,5 +1450,119 @@ export class CarsService {
 				verified_at: updatedDriver.verified_at?.toISOString(),
 			},
 		};
+	}
+
+	/**
+	 * Upload and add images to car using Cloudinary
+	 */
+	async uploadCarImages(carId: number, files: any[]) {
+		const car = await this.prisma.car.findUnique({ 
+			where: { id: carId },
+			include: { driver: true }
+		});
+
+		if (!car || !car.is_active) {
+			throw new NotFoundException('Car not found');
+		}
+
+		if (!files || files.length === 0) {
+			throw new BadRequestException('No files uploaded');
+		}
+
+		try {
+			// Upload to Cloudinary
+			const uploadResults = await this.cloudinaryService.uploadMultipleImages(
+				files,
+				'cars',
+				{
+					transformation: [
+						{ width: 1200, height: 800, crop: 'fill', quality: 'auto' },
+						{ fetch_format: 'auto' }
+					]
+				}
+			);
+
+			// Get current max order
+			const maxOrder = await this.prisma.carImage.findFirst({
+				where: { car_id: carId },
+				orderBy: { display_order: 'desc' },
+			});
+
+			const startOrder = (maxOrder?.display_order || -1) + 1;
+
+			// Save to database
+			await this.prisma.carImage.createMany({
+				data: uploadResults.map((result: any, index: number) => ({
+					car_id: carId,
+					image_url: result.secure_url,
+					public_id: result.public_id,
+					display_order: startOrder + index,
+				})),
+			});
+
+			return {
+				message: `${files.length} image(s) uploaded successfully`,
+				images: uploadResults.map((result: any) => ({
+					url: result.secure_url,
+					public_id: result.public_id,
+				})),
+			};
+		} catch (error) {
+			console.error('Upload error:', error);
+			throw new BadRequestException('Failed to upload images');
+		}
+	}
+
+	/**
+	 * Delete car image from Cloudinary and database
+	 */
+	async removeCarImageWithCloudinary(carId: number, imageId: number) {
+		const image = await this.prisma.carImage.findFirst({
+			where: { id: imageId, car_id: carId },
+		}) as any;
+
+		if (!image) {
+			throw new NotFoundException('Image not found');
+		}
+
+		try {
+			// Delete from Cloudinary if public_id exists
+			if (image.public_id) {
+				await this.cloudinaryService.deleteImage(image.public_id);
+			}
+			
+			// Delete from database
+			await this.prisma.carImage.delete({
+				where: { id: imageId },
+			});
+
+			return { message: 'Image deleted successfully' };
+		} catch (error) {
+			console.error('Delete error:', error);
+			throw new BadRequestException('Failed to delete image');
+		}
+	}
+
+	/**
+	 * Get optimized image URLs for different sizes
+	 */
+	async getOptimizedCarImages(carId: number) {
+		const images = await this.prisma.carImage.findMany({
+			where: { car_id: carId },
+			orderBy: { display_order: 'asc' },
+		}) as any[];
+
+		return images.map(image => ({
+			id: image.id,
+			original: image.image_url,
+			responsive: image.public_id ? 
+				this.cloudinaryService.generateResponsiveUrls(image.public_id) : 
+				{
+					thumbnail: image.image_url,
+					medium: image.image_url,
+					large: image.image_url,
+					original: image.image_url
+				}
+		}));
 	}
 }

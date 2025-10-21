@@ -260,12 +260,14 @@ model HotelImage {
   id            Int      @id @default(autoincrement())
   hotel_id      Int
   image_url     String
+  public_id     String? // Cloudinary public ID for deletion
   display_order Int
   created_at    DateTime @default(now())
 
   hotel Hotel @relation(fields: [hotel_id], references: [id], onDelete: Cascade)
 
   @@index([hotel_id, display_order])
+  @@index([public_id])
   @@map("hotel_images")
 }
 
@@ -325,12 +327,14 @@ model CarImage {
   id            Int      @id @default(autoincrement())
   car_id        Int
   image_url     String
+  public_id     String? // Cloudinary public ID for deletion
   display_order Int
   created_at    DateTime @default(now())
 
   car Car @relation(fields: [car_id], references: [id], onDelete: Cascade)
 
   @@index([car_id, display_order])
+  @@index([public_id])
 }
 
 // =====================

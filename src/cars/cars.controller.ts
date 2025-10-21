@@ -3,18 +3,24 @@ import {
 	Get,
 	Post,
 	Patch,
+	Delete,
 	Param,
 	Query,
 	Body,
 	ParseIntPipe,
 	UseGuards,
 	Request,
+	UseInterceptors,
+	UploadedFiles,
+	BadRequestException,
 } from '@nestjs/common';
+import { FilesInterceptor } from '@nestjs/platform-express';
 import { CarsService } from './cars.service';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '@prisma/client';
+import { imageUploadConfig } from '../common/config/multer.config';
 
 @Controller('cars')
 export class CarsController {
@@ -248,6 +254,62 @@ export class CarsController {
 	@Roles(Role.admin)
 	async verifyDriver(@Param('id', ParseIntPipe) id: number, @Body() body: any) {
 		return this.carsService.verifyDriverForAdmin(id, body);
+	}
+
+	/**
+	 * Upload images to car using Cloudinary (Driver only)
+	 * POST /cars/:carId/images/upload
+	 */
+	@Post(':carId/images/upload')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	@UseInterceptors(FilesInterceptor('images', 10, imageUploadConfig))
+	async uploadCarImages(
+		@Param('carId', ParseIntPipe) carId: number,
+		@UploadedFiles() files: any[],
+		@Request() req: any,
+	) {
+		if (!files || files.length === 0) {
+			throw new BadRequestException('No files uploaded');
+		}
+		
+		// Verify the car belongs to the authenticated driver
+		const car = await this.carsService.findOne(carId);
+		if (car.driver.id !== req.user.id) {
+			throw new BadRequestException('You can only upload images to your own cars');
+		}
+		
+		return this.carsService.uploadCarImages(carId, files);
+	}
+
+	/**
+	 * Delete car image from Cloudinary and database (Driver only)
+	 * DELETE /cars/:carId/images/:imageId/cloudinary
+	 */
+	@Delete(':carId/images/:imageId/cloudinary')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	async removeCarImageWithCloudinary(
+		@Param('carId', ParseIntPipe) carId: number,
+		@Param('imageId', ParseIntPipe) imageId: number,
+		@Request() req: any,
+	) {
+		// Verify the car belongs to the authenticated driver
+		const car = await this.carsService.findOne(carId);
+		if (car.driver.id !== req.user.id) {
+			throw new BadRequestException('You can only delete images from your own cars');
+		}
+		
+		return this.carsService.removeCarImageWithCloudinary(carId, imageId);
+	}
+
+	/**
+	 * Get optimized images for car
+	 * GET /cars/:carId/images/optimized
+	 */
+	@Get(':carId/images/optimized')
+	async getOptimizedCarImages(@Param('carId', ParseIntPipe) carId: number) {
+		return this.carsService.getOptimizedCarImages(carId);
 	}
 
 	/**
