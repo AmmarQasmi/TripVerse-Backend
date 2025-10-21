@@ -196,9 +196,8 @@ export class CarsController {
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.driver)
 	async addCar(@Request() req: any, @Body() body: any) {
-		// TODO: Implement driver car management
-		// This would be similar to hotels service but for drivers managing their cars
-		return { message: 'Driver car management not implemented yet' };
+		const driverId = req.user.id;
+		return this.carsService.addDriverCar(driverId, body);
 	}
 
 	/**
@@ -209,8 +208,8 @@ export class CarsController {
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.driver)
 	async updateCar(@Param('id', ParseIntPipe) id: number, @Request() req: any, @Body() body: any) {
-		// TODO: Implement driver car management
-		return { message: 'Driver car management not implemented yet' };
+		const driverId = req.user.id;
+		return this.carsService.updateDriverCar(driverId, id, body);
 	}
 
 	/**
@@ -221,8 +220,8 @@ export class CarsController {
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.driver)
 	async getDriverCars(@Request() req: any) {
-		// TODO: Implement driver car management
-		return { message: 'Driver car management not implemented yet' };
+		const driverId = req.user.id;
+		return this.carsService.getDriverCars(driverId);
 	}
 
 	// =====================
@@ -237,8 +236,7 @@ export class CarsController {
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.admin)
 	async getAllCars(@Query() query: any) {
-		// TODO: Implement admin car management
-		return { message: 'Admin car management not implemented yet' };
+		return this.carsService.getAllCarsForAdmin(query);
 	}
 
 	/**
@@ -249,8 +247,7 @@ export class CarsController {
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.admin)
 	async verifyDriver(@Param('id', ParseIntPipe) id: number, @Body() body: any) {
-		// TODO: Implement admin driver verification
-		return { message: 'Admin driver verification not implemented yet' };
+		return this.carsService.verifyDriverForAdmin(id, body);
 	}
 
 	/**

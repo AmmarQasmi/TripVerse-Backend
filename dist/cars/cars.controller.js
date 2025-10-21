@@ -72,19 +72,22 @@ let CarsController = class CarsController {
         return this.carsService.sendMessage(bookingId, senderId, body.message);
     }
     async addCar(req, body) {
-        return { message: 'Driver car management not implemented yet' };
+        const driverId = req.user.id;
+        return this.carsService.addDriverCar(driverId, body);
     }
     async updateCar(id, req, body) {
-        return { message: 'Driver car management not implemented yet' };
+        const driverId = req.user.id;
+        return this.carsService.updateDriverCar(driverId, id, body);
     }
     async getDriverCars(req) {
-        return { message: 'Driver car management not implemented yet' };
+        const driverId = req.user.id;
+        return this.carsService.getDriverCars(driverId);
     }
     async getAllCars(query) {
-        return { message: 'Admin car management not implemented yet' };
+        return this.carsService.getAllCarsForAdmin(query);
     }
     async verifyDriver(id, body) {
-        return { message: 'Admin driver verification not implemented yet' };
+        return this.carsService.verifyDriverForAdmin(id, body);
     }
     health() {
         return { ok: true, service: 'cars' };

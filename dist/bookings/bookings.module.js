@@ -11,13 +11,18 @@ const common_1 = require("@nestjs/common");
 const hotel_bookings_controller_1 = require("./hotel-bookings.controller");
 const car_bookings_controller_1 = require("./car-bookings.controller");
 const bookings_service_1 = require("./bookings.service");
+const prisma_service_1 = require("../prisma/prisma.service");
+const roles_guard_1 = require("../common/guards/roles.guard");
+const auth_module_1 = require("../auth/auth.module");
 let BookingsModule = class BookingsModule {
 };
 exports.BookingsModule = BookingsModule;
 exports.BookingsModule = BookingsModule = __decorate([
     (0, common_1.Module)({
+        imports: [auth_module_1.AuthModule],
         controllers: [hotel_bookings_controller_1.HotelBookingsController, car_bookings_controller_1.CarBookingsController],
-        providers: [bookings_service_1.BookingsService],
+        providers: [bookings_service_1.BookingsService, prisma_service_1.PrismaService, roles_guard_1.RolesGuard],
+        exports: [bookings_service_1.BookingsService],
     })
 ], BookingsModule);
 //# sourceMappingURL=bookings.module.js.map
