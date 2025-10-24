@@ -44,7 +44,7 @@ export class MonumentsController {
       fileSize: FILE_LIMITS.MAX_SIZE,
     },
     fileFilter: (req, file, callback) => {
-      if (FILE_LIMITS.ALLOWED_IMAGE_TYPES.includes(file.mimetype)) {
+      if (FILE_LIMITS.ALLOWED_IMAGE_TYPES.includes(file.mimetype as any)) {
         callback(null, true);
       } else {
         callback(new BadRequestException('Invalid file type. Only JPEG, PNG, and WebP images are allowed.'), false);

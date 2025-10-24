@@ -66,7 +66,7 @@ export class WikipediaService {
             result.categories = categoriesResponse.data.categories.map((cat: any) => cat.title);
           }
         } catch (catError) {
-          this.logger.warn('Failed to fetch categories:', catError.message);
+          this.logger.warn('Failed to fetch categories:', (catError as Error).message);
         }
 
         this.logger.log(`Found Wikipedia article: ${result.title}`);
@@ -75,12 +75,12 @@ export class WikipediaService {
 
       return null;
     } catch (error) {
-      if (error.response?.status === 404) {
+      if ((error as any).response?.status === 404) {
         this.logger.log(`No Wikipedia article found for: ${query}`);
         return null;
       }
       
-      this.logger.error('Wikipedia API error:', error.message);
+      this.logger.error('Wikipedia API error:', (error as Error).message);
       return null;
     }
   }
@@ -99,7 +99,7 @@ export class WikipediaService {
 
       return response.data;
     } catch (error) {
-      this.logger.error('Failed to get monument details:', error.message);
+      this.logger.error('Failed to get monument details:', (error as Error).message);
       return null;
     }
   }
@@ -134,7 +134,7 @@ export class WikipediaService {
 
       return [];
     } catch (error) {
-      this.logger.error('Similar monuments search error:', error.message);
+      this.logger.error('Similar monuments search error:', (error as Error).message);
       return [];
     }
   }
