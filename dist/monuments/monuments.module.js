@@ -10,13 +10,27 @@ exports.MonumentsModule = void 0;
 const common_1 = require("@nestjs/common");
 const monuments_controller_1 = require("./monuments.controller");
 const monuments_service_1 = require("./monuments.service");
+const prisma_module_1 = require("../prisma/prisma.module");
+const cloudinary_module_1 = require("../common/cloudinary/cloudinary.module");
+const google_vision_service_1 = require("../common/services/google-vision.service");
+const wikipedia_service_1 = require("../common/services/wikipedia.service");
+const google_places_service_1 = require("../common/services/google-places.service");
+const export_service_1 = require("../common/services/export.service");
 let MonumentsModule = class MonumentsModule {
 };
 exports.MonumentsModule = MonumentsModule;
 exports.MonumentsModule = MonumentsModule = __decorate([
     (0, common_1.Module)({
+        imports: [prisma_module_1.PrismaModule, cloudinary_module_1.CloudinaryModule],
         controllers: [monuments_controller_1.MonumentsController],
-        providers: [monuments_service_1.MonumentsService],
+        providers: [
+            monuments_service_1.MonumentsService,
+            google_vision_service_1.GoogleVisionService,
+            wikipedia_service_1.WikipediaService,
+            google_places_service_1.GooglePlacesService,
+            export_service_1.ExportService,
+        ],
+        exports: [monuments_service_1.MonumentsService],
     })
 ], MonumentsModule);
 //# sourceMappingURL=monuments.module.js.map

@@ -158,6 +158,7 @@ model User {
   payments          PaymentTransaction[]
   notifications     Notification[]
   recognitions      MonumentRecognition[]
+  monumentExports   MonumentExportLog[]
   chatMessages      ChatMessage[]
   reviewedDocuments DriverDocument[]      @relation("DocumentReviewer")
 
@@ -456,8 +457,25 @@ model MonumentRecognition {
   created_at       DateTime @default(now())
 
   user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  exports MonumentExportLog[]
 
   @@index([user_id, created_at])
+}
+
+model MonumentExportLog {
+  id               Int      @id @default(autoincrement())
+  user_id          Int
+  monument_id      Int
+  format           String   // 'pdf' or 'docx'
+  file_url         String
+  file_size        Int?      // in bytes
+  created_at       DateTime @default(now())
+
+  user     User              @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  monument MonumentRecognition @relation(fields: [monument_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, created_at])
+  @@index([monument_id])
 }
 
 model Dispute {
