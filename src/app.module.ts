@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
@@ -11,10 +12,17 @@ import { PaymentsModule } from './payments/payments.module';
 import { MonumentsModule } from './monuments/monuments.module';
 import { WeatherModule } from './weather/weather.module';
 import { AdminModule } from './admin/admin.module';
+import { CloudinaryModule } from './common/cloudinary/cloudinary.module';
+import { UploadModule } from './common/upload/upload.module';
 
 @Module({
 	imports: [
+		ConfigModule.forRoot({
+			isGlobal: true,
+			envFilePath: '.env',
+		}),
 		PrismaModule,
+		CloudinaryModule,
 		AuthModule,
 		UsersModule,
 		CitiesModule,
@@ -26,6 +34,7 @@ import { AdminModule } from './admin/admin.module';
 		MonumentsModule,
 		WeatherModule,
 		AdminModule,
+		UploadModule,
 	],
 })
 export class AppModule {}

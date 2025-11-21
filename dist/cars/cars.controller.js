@@ -93,7 +93,13 @@ let CarsController = class CarsController {
     }
     async uploadCarImages(carId, files, req) {
         if (!files || files.length === 0) {
-            throw new common_1.BadRequestException('No files uploaded');
+            throw new common_1.BadRequestException('No files uploaded or invalid file type. Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.');
+        }
+        const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+        for (const file of files) {
+            if (!file.mimetype || !allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+                throw new common_1.BadRequestException(`Invalid file type: ${file.originalname}. Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.`);
+            }
         }
         const car = await this.carsService.findOne(carId);
         if (car.driver.id !== req.user.id) {

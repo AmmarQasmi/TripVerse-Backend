@@ -12,9 +12,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DriversService = void 0;
 const common_1 = require("@nestjs/common");
 const prisma_service_1 = require("../prisma/prisma.service");
+const cloudinary_service_1 = require("../common/cloudinary/cloudinary.service");
 let DriversService = class DriversService {
-    constructor(prisma) {
+    constructor(prisma, cloudinaryService) {
         this.prisma = prisma;
+        this.cloudinaryService = cloudinaryService;
     }
     async submitVerification(userId, dto) {
         const driver = await this.prisma.driver.findFirst({
@@ -28,9 +30,29 @@ let DriversService = class DriversService {
                 throw new common_1.BadRequestException(`Rating for ${rating.platform} must be 4.0 or higher for verification`);
             }
         }
-        await this.prisma.$transaction(async (tx) => {
-            for (const doc of dto.documents) {
-                await tx.driverDocument.create({
+        const ratingsWithScreenshots = dto.ratings.filter(r => r.screenshot_url && r.screenshot_url.trim() !== '');
+        if (ratingsWithScreenshots.length === 0) {
+            throw new common_1.BadRequestException('At least one rating must include a screenshot');
+        }
+        for (const doc of dto.documents) {
+            const existingDoc = await this.prisma.driverDocument.findFirst({
+                where: {
+                    driver_id: driver.id,
+                    document_type: doc.document_type,
+                },
+            });
+            if (existingDoc) {
+                await this.prisma.driverDocument.update({
+                    where: { id: existingDoc.id },
+                    data: {
+                        document_url: doc.document_url,
+                        status: 'pending',
+                        uploaded_at: new Date(),
+                    },
+                });
+            }
+            else {
+                await this.prisma.driverDocument.create({
                     data: {
                         driver_id: driver.id,
                         document_type: doc.document_type,
@@ -39,17 +61,35 @@ let DriversService = class DriversService {
                     },
                 });
             }
-            for (const rating of dto.ratings) {
-                await tx.driverRating.create({
+        }
+        for (const rating of dto.ratings) {
+            const existingRating = await this.prisma.driverRating.findFirst({
+                where: {
+                    driver_id: driver.id,
+                    platform: rating.platform,
+                },
+            });
+            if (existingRating) {
+                await this.prisma.driverRating.update({
+                    where: { id: existingRating.id },
+                    data: {
+                        rating: rating.rating,
+                        screenshot_url: rating.screenshot_url || null,
+                        verified_at: null,
+                    },
+                });
+            }
+            else {
+                await this.prisma.driverRating.create({
                     data: {
                         driver_id: driver.id,
                         platform: rating.platform,
                         rating: rating.rating,
-                        screenshot_url: rating.screenshot_url,
+                        screenshot_url: rating.screenshot_url || null,
                     },
                 });
             }
-        });
+        }
         const updatedDriver = await this.prisma.driver.findUnique({
             where: { id: driver.id },
             include: {
@@ -248,10 +288,73 @@ let DriversService = class DriversService {
             },
         });
     }
+    async uploadDocument(userId, file, documentType) {
+        const driver = await this.prisma.driver.findFirst({
+            where: { user_id: userId },
+        });
+        if (!driver) {
+            throw new common_1.NotFoundException('Driver profile not found');
+        }
+        try {
+            const uploadResult = await this.cloudinaryService.uploadDocument(file, 'driver-documents', {});
+            const document = await this.prisma.driverDocument.create({
+                data: {
+                    driver_id: driver.id,
+                    document_type: documentType,
+                    document_url: uploadResult.secure_url,
+                    public_id: uploadResult.public_id,
+                    status: 'pending',
+                },
+            });
+            return {
+                message: 'Document uploaded successfully',
+                document: {
+                    id: document.id,
+                    document_type: document.document_type,
+                    document_url: document.document_url,
+                    public_id: document.public_id,
+                    status: document.status,
+                },
+            };
+        }
+        catch (error) {
+            throw new common_1.BadRequestException('Failed to upload document');
+        }
+    }
+    async deleteDocument(userId, documentId) {
+        const driver = await this.prisma.driver.findFirst({
+            where: { user_id: userId },
+        });
+        if (!driver) {
+            throw new common_1.NotFoundException('Driver profile not found');
+        }
+        const document = await this.prisma.driverDocument.findFirst({
+            where: {
+                id: documentId,
+                driver_id: driver.id,
+            },
+        });
+        if (!document) {
+            throw new common_1.NotFoundException('Document not found');
+        }
+        try {
+            if (document.public_id) {
+                await this.cloudinaryService.deleteImage(document.public_id);
+            }
+            await this.prisma.driverDocument.delete({
+                where: { id: documentId },
+            });
+            return { message: 'Document deleted successfully' };
+        }
+        catch (error) {
+            throw new common_1.BadRequestException('Failed to delete document');
+        }
+    }
 };
 exports.DriversService = DriversService;
 exports.DriversService = DriversService = __decorate([
     (0, common_1.Injectable)(),
-    __metadata("design:paramtypes", [prisma_service_1.PrismaService])
+    __metadata("design:paramtypes", [prisma_service_1.PrismaService,
+        cloudinary_service_1.CloudinaryService])
 ], DriversService);
 //# sourceMappingURL=drivers.service.js.map

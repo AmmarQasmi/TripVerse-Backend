@@ -270,7 +270,15 @@ export class CarsController {
 		@Request() req: any,
 	) {
 		if (!files || files.length === 0) {
-			throw new BadRequestException('No files uploaded');
+			throw new BadRequestException('No files uploaded or invalid file type. Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.');
+		}
+
+		// Validate file types
+		const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+		for (const file of files) {
+			if (!file.mimetype || !allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+				throw new BadRequestException(`Invalid file type: ${file.originalname}. Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.`);
+			}
 		}
 		
 		// Verify the car belongs to the authenticated driver

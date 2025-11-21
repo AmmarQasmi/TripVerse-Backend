@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
 import * as cookieParser from 'cookie-parser';
+import { MulterExceptionFilter } from './common/filters/multer-exception.filter';
 
 async function bootstrap() {
 	const app = await NestFactory.create(AppModule, {
@@ -10,6 +11,9 @@ async function bootstrap() {
 	
 	// Enable cookie parser - MUST come before routes
 	app.use(cookieParser());
+	
+	// Global exception filter for multer errors
+	app.useGlobalFilters(new MulterExceptionFilter());
 	
 	// Enable global validation
 	app.useGlobalPipes(

@@ -4,11 +4,13 @@ const core_1 = require("@nestjs/core");
 const common_1 = require("@nestjs/common");
 const app_module_1 = require("./app.module");
 const cookieParser = require("cookie-parser");
+const multer_exception_filter_1 = require("./common/filters/multer-exception.filter");
 async function bootstrap() {
     const app = await core_1.NestFactory.create(app_module_1.AppModule, {
         logger: ['error', 'warn', 'log'],
     });
     app.use(cookieParser());
+    app.useGlobalFilters(new multer_exception_filter_1.MulterExceptionFilter());
     app.useGlobalPipes(new common_1.ValidationPipe({
         whitelist: true,
         forbidNonWhitelisted: true,

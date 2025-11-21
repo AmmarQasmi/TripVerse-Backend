@@ -15,13 +15,12 @@ const common_1 = require("@nestjs/common");
 const client_1 = require("@prisma/client");
 let PrismaService = PrismaService_1 = class PrismaService extends client_1.PrismaClient {
     constructor() {
-        const databaseUrl = process.env.DATABASE_URL || '';
-        const hasPgBouncer = databaseUrl.includes('pgbouncer=true');
-        let connectionString = databaseUrl;
-        if (!hasPgBouncer && databaseUrl.includes(':6543')) {
-            const separator = databaseUrl.includes('?') ? '&' : '?';
-            connectionString = `${databaseUrl}${separator}pgbouncer=true&connection_limit=1&pool_timeout=10`;
-            console.log('🔧 Auto-configured PgBouncer parameters');
+        const connectionString = process.env.DATABASE_URL || '';
+        const isUsingPgBouncer = connectionString.includes(':6543') || connectionString.includes('pgbouncer=true');
+        let finalConnectionString = connectionString;
+        if (isUsingPgBouncer && !connectionString.includes('pgbouncer=true')) {
+            const separator = connectionString.includes('?') ? '&' : '?';
+            finalConnectionString = `${connectionString}${separator}pgbouncer=true`;
         }
         super({
             log: [
@@ -31,11 +30,20 @@ let PrismaService = PrismaService_1 = class PrismaService extends client_1.Prism
             errorFormat: 'minimal',
             datasources: {
                 db: {
-                    url: connectionString,
+                    url: finalConnectionString,
                 },
             },
         });
         this.logger = new common_1.Logger(PrismaService_1.name);
+        if (!connectionString) {
+            this.logger.warn('⚠️ DATABASE_URL is not set in environment variables');
+        }
+        if (isUsingPgBouncer && !connectionString.includes('pgbouncer=true')) {
+            this.logger.warn('⚠️ Added pgbouncer=true to connection string (required for transaction pooling)');
+        }
+        if (isUsingPgBouncer) {
+            this.logger.log('🔄 PgBouncer transaction pooling detected - prepared statements disabled');
+        }
         if (process.env.NODE_ENV === 'development') {
             this.$on('query', (e) => {
                 if (e.duration > 1000) {
