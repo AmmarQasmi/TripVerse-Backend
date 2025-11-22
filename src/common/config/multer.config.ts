@@ -1,19 +1,26 @@
 import { MulterOptions } from '@nestjs/platform-express/multer/interfaces/multer-options.interface';
-import { diskStorage } from 'multer';
-import { extname } from 'path';
+import { memoryStorage } from 'multer';
 
 export const multerConfig: MulterOptions = {
-  storage: diskStorage({
-    destination: './uploads/temp',
-    filename: (req: any, file: any, callback: any) => {
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-      const ext = extname(file.originalname);
-      callback(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
-    },
-  }),
+  storage: memoryStorage(),
   fileFilter: (req: any, file: any, callback: any) => {
-    if (!file.mimetype.match(/\/(jpg|jpeg|png|gif|webp)$/)) {
-      return callback(new Error('Only image files are allowed!'), false);
+    // Allow files without mimetype (some clients don't send it)
+    if (!file.mimetype) {
+      return callback(null, true);
+    }
+
+    // Check if file is an image or PDF (for documents)
+    const allowedMimeTypes = [
+      'image/jpeg',
+      'image/jpg',
+      'image/png',
+      'image/gif',
+      'image/webp',
+      'application/pdf',
+    ];
+    if (!allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+      // Return false without error to prevent multer from throwing
+      return callback(null, false);
     }
     callback(null, true);
   },
@@ -23,18 +30,18 @@ export const multerConfig: MulterOptions = {
 };
 
 export const imageUploadConfig: MulterOptions = {
-  storage: diskStorage({
-    destination: './uploads/temp',
-    filename: (req: any, file: any, callback: any) => {
-      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-      const ext = extname(file.originalname);
-      callback(null, `image-${uniqueSuffix}${ext}`);
-    },
-  }),
+  storage: memoryStorage(),
   fileFilter: (req: any, file: any, callback: any) => {
+    // Allow files without mimetype (some clients don't send it)
+    if (!file.mimetype) {
+      return callback(null, true);
+    }
+
     // Check if file is an image
-    if (!file.mimetype.match(/\/(jpg|jpeg|png|gif|webp)$/)) {
-      return callback(new Error('Only image files are allowed!'), false);
+    const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+      // Return false without error to prevent multer from throwing
+      return callback(null, false);
     }
     callback(null, true);
   },

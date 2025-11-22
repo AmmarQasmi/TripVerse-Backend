@@ -23,9 +23,8 @@ class RatingUploadDto {
 	@Max(5.0)
 	rating!: number; // Must be 4.0 or higher
 
-	@IsNotEmpty()
 	@IsString()
-	screenshot_url!: string;
+	screenshot_url?: string; // Optional - at least one rating must have a screenshot
 }
 
 export class SubmitVerificationDto {

@@ -6,18 +6,19 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 	private readonly logger = new Logger(PrismaService.name);
 
 	constructor() {
-		// Build optimized connection string
-		const databaseUrl = process.env.DATABASE_URL || '';
-		const hasPgBouncer = databaseUrl.includes('pgbouncer=true');
+		// Use DATABASE_URL as-is - don't modify it
+		// Connection string should be configured in .env file
+		const connectionString = process.env.DATABASE_URL || '';
 		
-		// If using PgBouncer and params not already in URL, add them programmatically
-		let connectionString = databaseUrl;
+		// Check if using PgBouncer (transaction pooling)
+		const isUsingPgBouncer = connectionString.includes(':6543') || connectionString.includes('pgbouncer=true');
 		
-		if (!hasPgBouncer && databaseUrl.includes(':6543')) {
-			// Port 6543 detected but no pgbouncer params → add them
-			const separator = databaseUrl.includes('?') ? '&' : '?';
-			connectionString = `${databaseUrl}${separator}pgbouncer=true&connection_limit=1&pool_timeout=10`;
-			console.log('🔧 Auto-configured PgBouncer parameters');
+		// Ensure pgbouncer=true is in the connection string for transaction pooling
+		// This tells Prisma to disable prepared statements (required for PgBouncer transaction mode)
+		let finalConnectionString = connectionString;
+		if (isUsingPgBouncer && !connectionString.includes('pgbouncer=true')) {
+			const separator = connectionString.includes('?') ? '&' : '?';
+			finalConnectionString = `${connectionString}${separator}pgbouncer=true`;
 		}
 		
 		super({
@@ -28,10 +29,23 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 			errorFormat: 'minimal',
 			datasources: {
 				db: {
-					url: connectionString,
+					url: finalConnectionString,
 				},
 			},
 		});
+
+		// Log after super() call
+		if (!connectionString) {
+			this.logger.warn('⚠️ DATABASE_URL is not set in environment variables');
+		}
+		
+		if (isUsingPgBouncer && !connectionString.includes('pgbouncer=true')) {
+			this.logger.warn('⚠️ Added pgbouncer=true to connection string (required for transaction pooling)');
+		}
+		
+		if (isUsingPgBouncer) {
+			this.logger.log('🔄 PgBouncer transaction pooling detected - prepared statements disabled');
+		}
 
 		// Log database queries in development (helps debug slow queries)
 		if (process.env.NODE_ENV === 'development') {

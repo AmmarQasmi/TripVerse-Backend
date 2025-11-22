@@ -220,6 +220,7 @@ model DriverDocument {
   driver_id        Int
   document_type    DocumentType
   document_url     String
+  public_id        String? // Cloudinary public ID for deletion
   status           DocumentStatus @default(pending)
   rejection_reason String?
   uploaded_at      DateTime       @default(now())
@@ -231,6 +232,7 @@ model DriverDocument {
 
   @@index([driver_id])
   @@index([status])
+  @@index([public_id])
 }
 
 model Hotel {
@@ -456,22 +458,22 @@ model MonumentRecognition {
   raw_payload_json Json?
   created_at       DateTime @default(now())
 
-  user User @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  user    User                @relation(fields: [user_id], references: [id], onDelete: Cascade)
   exports MonumentExportLog[]
 
   @@index([user_id, created_at])
 }
 
 model MonumentExportLog {
-  id               Int      @id @default(autoincrement())
-  user_id          Int
-  monument_id      Int
-  format           String   // 'pdf' or 'docx'
-  file_url         String
-  file_size        Int?      // in bytes
-  created_at       DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  user_id     Int
+  monument_id Int
+  format      String // 'pdf' or 'docx'
+  file_url    String
+  file_size   Int? // in bytes
+  created_at  DateTime @default(now())
 
-  user     User              @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  user     User                @relation(fields: [user_id], references: [id], onDelete: Cascade)
   monument MonumentRecognition @relation(fields: [monument_id], references: [id], onDelete: Cascade)
 
   @@index([user_id, created_at])

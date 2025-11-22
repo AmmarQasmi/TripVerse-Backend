@@ -60,7 +60,13 @@ let HotelsController = class HotelsController {
     }
     async uploadImages(hotelId, files) {
         if (!files || files.length === 0) {
-            throw new common_1.BadRequestException('No files uploaded');
+            throw new common_1.BadRequestException('No files uploaded or invalid file type. Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.');
+        }
+        const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+        for (const file of files) {
+            if (!file.mimetype || !allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+                throw new common_1.BadRequestException(`Invalid file type: ${file.originalname}. Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.`);
+            }
         }
         return this.hotelsService.uploadImages(hotelId, files);
     }
