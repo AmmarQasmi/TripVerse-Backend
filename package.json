@@ -12,17 +12,22 @@
     "prisma:migrate": "prisma migrate dev"
   },
   "dependencies": {
+    "@google-cloud/vision": "^5.3.4",
     "@nestjs/config": "^4.0.2",
+    "@nestjs/schedule": "^4.1.2",
     "@prisma/client": "^6.16.3",
     "@types/multer": "^2.0.0",
+    "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.2",
     "cloudinary": "^2.8.0",
     "cookie-parser": "^1.4.7",
+    "docx": "^9.5.1",
     "multer": "^2.0.2",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "puppeteer": "^24.31.0",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },

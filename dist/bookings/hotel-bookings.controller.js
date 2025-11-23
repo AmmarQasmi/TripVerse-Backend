@@ -15,13 +15,15 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.HotelBookingsController = void 0;
 const common_1 = require("@nestjs/common");
 const bookings_service_1 = require("./bookings.service");
+const prisma_service_1 = require("../prisma/prisma.service");
 const auth_guard_1 = require("../common/guards/auth.guard");
 const roles_guard_1 = require("../common/guards/roles.guard");
 const roles_decorator_1 = require("../common/decorators/roles.decorator");
 const client_1 = require("@prisma/client");
 let HotelBookingsController = class HotelBookingsController {
-    constructor(bookingsService) {
+    constructor(bookingsService, prisma) {
         this.bookingsService = bookingsService;
+        this.prisma = prisma;
     }
     async createBookingRequest(req, body) {
         const userId = req.user.id;
@@ -45,6 +47,26 @@ let HotelBookingsController = class HotelBookingsController {
     async cancelBooking(id, req) {
         const userId = req.user.id;
         return this.bookingsService.cancelHotelBooking(id, userId);
+    }
+    async getManagerBookings(req, status) {
+        const hotelManager = await this.prisma.hotelManager.findFirst({
+            where: { user_id: req.user.id },
+        });
+        if (!hotelManager) {
+            throw new Error('Hotel manager profile not found');
+        }
+        return this.bookingsService.getManagerHotelBookings(hotelManager.id, status);
+    }
+    async getManagerStats(req, dateFrom, dateTo) {
+        const hotelManager = await this.prisma.hotelManager.findFirst({
+            where: { user_id: req.user.id },
+        });
+        if (!hotelManager) {
+            throw new Error('Hotel manager profile not found');
+        }
+        const from = dateFrom ? new Date(dateFrom) : undefined;
+        const to = dateTo ? new Date(dateTo) : undefined;
+        return this.bookingsService.getManagerBookingStats(hotelManager.id, from, to);
     }
     async getAllBookings(query) {
         return this.bookingsService.getAllHotelBookingsForAdmin(query);
@@ -104,6 +126,27 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], HotelBookingsController.prototype, "cancelBooking", null);
 __decorate([
+    (0, common_1.Get)('manager/bookings'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.hotel_manager),
+    __param(0, (0, common_1.Request)()),
+    __param(1, (0, common_1.Query)('status')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, String]),
+    __metadata("design:returntype", Promise)
+], HotelBookingsController.prototype, "getManagerBookings", null);
+__decorate([
+    (0, common_1.Get)('manager/stats'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.hotel_manager),
+    __param(0, (0, common_1.Request)()),
+    __param(1, (0, common_1.Query)('dateFrom')),
+    __param(2, (0, common_1.Query)('dateTo')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, String, String]),
+    __metadata("design:returntype", Promise)
+], HotelBookingsController.prototype, "getManagerStats", null);
+__decorate([
     (0, common_1.Get)('admin/all'),
     (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
     (0, roles_decorator_1.Roles)(client_1.Role.admin),
@@ -120,6 +163,7 @@ __decorate([
 ], HotelBookingsController.prototype, "health", null);
 exports.HotelBookingsController = HotelBookingsController = __decorate([
     (0, common_1.Controller)('hotel-bookings'),
-    __metadata("design:paramtypes", [bookings_service_1.BookingsService])
+    __metadata("design:paramtypes", [bookings_service_1.BookingsService,
+        prisma_service_1.PrismaService])
 ], HotelBookingsController);
 //# sourceMappingURL=hotel-bookings.controller.js.map

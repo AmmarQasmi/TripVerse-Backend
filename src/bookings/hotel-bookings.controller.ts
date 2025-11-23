@@ -11,6 +11,7 @@ import {
 	Request,
 } from '@nestjs/common';
 import { BookingsService } from './bookings.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -18,7 +19,10 @@ import { Role } from '@prisma/client';
 
 @Controller('hotel-bookings')
 export class HotelBookingsController {
-	constructor(private readonly bookingsService: BookingsService) {}
+	constructor(
+		private readonly bookingsService: BookingsService,
+		private readonly prisma: PrismaService,
+	) {}
 
 	/**
 	 * Create hotel booking request (Customer)
@@ -80,6 +84,54 @@ export class HotelBookingsController {
 	async cancelBooking(@Param('id', ParseIntPipe) id: number, @Request() req: any) {
 		const userId = req.user.id;
 		return this.bookingsService.cancelHotelBooking(id, userId);
+	}
+
+	// =====================
+	// ADMIN ENDPOINTS
+	// =====================
+
+	// =====================
+	// HOTEL MANAGER ENDPOINTS
+	// =====================
+
+	/**
+	 * Get hotel manager bookings for their hotels
+	 * GET /hotel-bookings/manager/bookings?status=CONFIRMED
+	 */
+	@Get('manager/bookings')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.hotel_manager)
+	async getManagerBookings(@Request() req: any, @Query('status') status?: string) {
+		const hotelManager = await this.prisma.hotelManager.findFirst({
+			where: { user_id: req.user.id },
+		});
+		if (!hotelManager) {
+			throw new Error('Hotel manager profile not found');
+		}
+		return this.bookingsService.getManagerHotelBookings(hotelManager.id, status);
+	}
+
+	/**
+	 * Get hotel manager booking statistics
+	 * GET /hotel-bookings/manager/stats?dateFrom=2024-01-01&dateTo=2024-12-31
+	 */
+	@Get('manager/stats')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.hotel_manager)
+	async getManagerStats(
+		@Request() req: any,
+		@Query('dateFrom') dateFrom?: string,
+		@Query('dateTo') dateTo?: string,
+	) {
+		const hotelManager = await this.prisma.hotelManager.findFirst({
+			where: { user_id: req.user.id },
+		});
+		if (!hotelManager) {
+			throw new Error('Hotel manager profile not found');
+		}
+		const from = dateFrom ? new Date(dateFrom) : undefined;
+		const to = dateTo ? new Date(dateTo) : undefined;
+		return this.bookingsService.getManagerBookingStats(hotelManager.id, from, to);
 	}
 
 	// =====================

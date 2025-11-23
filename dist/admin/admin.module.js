@@ -10,13 +10,19 @@ exports.AdminModule = void 0;
 const common_1 = require("@nestjs/common");
 const admin_controller_1 = require("./admin.controller");
 const admin_service_1 = require("./admin.service");
+const scheduled_jobs_service_1 = require("./scheduled-jobs.service");
+const drivers_module_1 = require("../drivers/drivers.module");
+const hotel_managers_module_1 = require("../hotel-managers/hotel-managers.module");
+const notifications_module_1 = require("../notifications/notifications.module");
 let AdminModule = class AdminModule {
 };
 exports.AdminModule = AdminModule;
 exports.AdminModule = AdminModule = __decorate([
     (0, common_1.Module)({
+        imports: [drivers_module_1.DriversModule, hotel_managers_module_1.HotelManagersModule, notifications_module_1.NotificationsModule],
         controllers: [admin_controller_1.AdminController],
-        providers: [admin_service_1.AdminService],
+        providers: [admin_service_1.AdminService, scheduled_jobs_service_1.ScheduledJobsService],
+        exports: [admin_service_1.AdminService],
     })
 ], AdminModule);
 //# sourceMappingURL=admin.module.js.map

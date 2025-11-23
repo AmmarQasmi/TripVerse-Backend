@@ -8,15 +8,22 @@ var __decorate = (this && this.__decorate) || function (decorators, target, key,
 var __metadata = (this && this.__metadata) || function (k, v) {
     if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v);
 };
+var __param = (this && this.__param) || function (paramIndex, decorator) {
+    return function (target, key) { decorator(target, key, paramIndex); }
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CarsService = void 0;
 const common_1 = require("@nestjs/common");
 const prisma_service_1 = require("../prisma/prisma.service");
 const cloudinary_service_1 = require("../common/cloudinary/cloudinary.service");
+const notifications_service_1 = require("../common/services/notifications.service");
+const admin_service_1 = require("../admin/admin.service");
 let CarsService = class CarsService {
-    constructor(prisma, cloudinaryService) {
+    constructor(prisma, cloudinaryService, notificationsService, adminService) {
         this.prisma = prisma;
         this.cloudinaryService = cloudinaryService;
+        this.notificationsService = notificationsService;
+        this.adminService = adminService;
     }
     async searchCars(query = {}) {
         const { city_id, start_date, end_date, seats, transmission, fuel_type, min_price, max_price, page = 1, limit = 20, } = query;
@@ -343,6 +350,7 @@ let CarsService = class CarsService {
                 },
             },
         });
+        await this.notificationsService.notifyBookingRequest(booking.car.driver.user.id, booking.id, booking.user.full_name);
         return {
             id: booking.id,
             status: booking.status,
@@ -365,12 +373,22 @@ let CarsService = class CarsService {
         };
     }
     async respondToBooking(bookingId, driverId, response, driverNotes) {
+        var _a;
         const booking = await this.prisma.carBooking.findUnique({
             where: { id: bookingId },
             include: {
                 car: {
                     include: {
-                        driver: true,
+                        driver: {
+                            include: {
+                                user: {
+                                    select: {
+                                        id: true,
+                                        full_name: true,
+                                    },
+                                },
+                            },
+                        },
                     },
                 },
                 user: true,
@@ -393,6 +411,13 @@ let CarsService = class CarsService {
                 driver_notes: driverNotes,
             },
         });
+        const driverName = ((_a = booking.car.driver.user) === null || _a === void 0 ? void 0 : _a.full_name) || 'Driver';
+        if (response === 'accept') {
+            await this.notificationsService.notifyBookingAccepted(booking.user_id, bookingId, driverName);
+        }
+        else {
+            await this.notificationsService.notifyBookingRejected(booking.user_id, bookingId, driverName);
+        }
         return {
             id: updatedBooking.id,
             status: updatedBooking.status,
@@ -460,6 +485,8 @@ let CarsService = class CarsService {
                 booking_id: bookingId,
             },
         });
+        await this.notificationsService.notifyBookingConfirmed(booking.user_id, bookingId, 'car');
+        await this.notificationsService.notifyBookingConfirmed(booking.car.driver.user_id, bookingId, 'car');
         return {
             id: updatedBooking.id,
             status: updatedBooking.status,
@@ -560,12 +587,22 @@ let CarsService = class CarsService {
         }));
     }
     async startTrip(bookingId, driverId, otpCode) {
+        var _a;
         const booking = await this.prisma.carBooking.findUnique({
             where: { id: bookingId },
             include: {
                 car: {
                     include: {
-                        driver: true,
+                        driver: {
+                            include: {
+                                user: {
+                                    select: {
+                                        id: true,
+                                        full_name: true,
+                                    },
+                                },
+                            },
+                        },
                     },
                 },
                 user: true,
@@ -591,6 +628,8 @@ let CarsService = class CarsService {
                 started_at: new Date(),
             },
         });
+        const driverName = ((_a = booking.car.driver.user) === null || _a === void 0 ? void 0 : _a.full_name) || 'Driver';
+        await this.notificationsService.notifyTripStarted(booking.user_id, bookingId, driverName);
         return {
             id: updatedBooking.id,
             status: updatedBooking.status,
@@ -599,6 +638,7 @@ let CarsService = class CarsService {
         };
     }
     async completeTrip(bookingId, driverId) {
+        var _a;
         const booking = await this.prisma.carBooking.findUnique({
             where: { id: bookingId },
             include: {
@@ -625,6 +665,31 @@ let CarsService = class CarsService {
                 completed_at: new Date(),
             },
         });
+        const bookingWithUser = await this.prisma.carBooking.findUnique({
+            where: { id: bookingId },
+            include: {
+                car: {
+                    include: {
+                        driver: {
+                            include: {
+                                user: true,
+                            },
+                        },
+                    },
+                },
+            },
+        });
+        if (bookingWithUser) {
+            const driverName = ((_a = bookingWithUser.car.driver.user) === null || _a === void 0 ? void 0 : _a.full_name) || 'Driver';
+            await this.notificationsService.notifyTripCompleted(bookingWithUser.user_id, bookingId, driverName);
+            const driverId = bookingWithUser.car.driver_id;
+            try {
+                await this.adminService.resumeSuspensionAfterRide(driverId, bookingId);
+            }
+            catch (error) {
+                console.error('Error resuming suspension after ride:', error);
+            }
+        }
         return {
             id: updatedBooking.id,
             status: updatedBooking.status,
@@ -1217,7 +1282,10 @@ let CarsService = class CarsService {
 exports.CarsService = CarsService;
 exports.CarsService = CarsService = __decorate([
     (0, common_1.Injectable)(),
+    __param(3, (0, common_1.Inject)((0, common_1.forwardRef)(() => admin_service_1.AdminService))),
     __metadata("design:paramtypes", [prisma_service_1.PrismaService,
-        cloudinary_service_1.CloudinaryService])
+        cloudinary_service_1.CloudinaryService,
+        notifications_service_1.NotificationsService,
+        admin_service_1.AdminService])
 ], CarsService);
 //# sourceMappingURL=cars.service.js.map
