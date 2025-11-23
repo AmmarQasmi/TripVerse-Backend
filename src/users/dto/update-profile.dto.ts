@@ -1,4 +1,5 @@
-import { IsString, IsOptional, MinLength, MaxLength } from 'class-validator';
+import { IsString, IsOptional, MinLength, MaxLength, IsInt } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class UpdateProfileDto {
 	@IsOptional()
@@ -8,7 +9,8 @@ export class UpdateProfileDto {
 	full_name?: string;
 
 	@IsOptional()
-	@IsString()
+	@Type(() => Number)
+	@IsInt()
 	city_id?: number;
 }
 
