@@ -12,10 +12,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.BookingsService = void 0;
 const common_1 = require("@nestjs/common");
 const prisma_service_1 = require("../prisma/prisma.service");
+const notifications_service_1 = require("../common/services/notifications.service");
 const client_1 = require("@prisma/client");
 let BookingsService = class BookingsService {
-    constructor(prisma) {
+    constructor(prisma, notificationsService) {
         this.prisma = prisma;
+        this.notificationsService = notificationsService;
     }
     async createHotelBookingRequest(data) {
         const { hotel_id, room_type_id, user_id, quantity, check_in, check_out, guest_notes } = data;
@@ -45,6 +47,12 @@ let BookingsService = class BookingsService {
                 where: { id: hotel_id },
                 include: {
                     city: { select: { id: true, name: true } },
+                    manager: {
+                        select: {
+                            id: true,
+                            is_verified: true,
+                        },
+                    },
                     roomTypes: {
                         where: { id: room_type_id, is_active: true },
                     },
@@ -52,6 +60,12 @@ let BookingsService = class BookingsService {
             });
             if (!hotel || !hotel.is_active) {
                 throw new common_1.NotFoundException('Hotel not found or inactive');
+            }
+            if (!hotel.manager || !hotel.manager.is_verified) {
+                throw new common_1.BadRequestException('Hotel manager is not verified. This hotel is not available for booking.');
+            }
+            if (!hotel.is_listed) {
+                throw new common_1.BadRequestException('Hotel is not currently listed. This hotel is not available for booking.');
             }
             if (hotel.roomTypes.length === 0) {
                 throw new common_1.NotFoundException('Room type not found or inactive');
@@ -293,6 +307,7 @@ let BookingsService = class BookingsService {
                 status: client_1.HotelBookingStatus.CONFIRMED,
             },
         });
+        await this.notificationsService.notifyBookingConfirmed(userId, bookingId, 'hotel');
         return {
             id: updatedBooking.id,
             status: updatedBooking.status,
@@ -405,10 +420,192 @@ let BookingsService = class BookingsService {
             },
         };
     }
+    async getManagerHotelBookings(managerId, status) {
+        const hotels = await this.prisma.hotel.findMany({
+            where: { manager_id: managerId },
+            select: { id: true },
+        });
+        const hotelIds = hotels.map(h => h.id);
+        if (hotelIds.length === 0) {
+            return {
+                data: [],
+                pagination: {
+                    page: 1,
+                    limit: 20,
+                    total: 0,
+                    totalPages: 0,
+                },
+            };
+        }
+        const where = {
+            hotel_id: { in: hotelIds },
+        };
+        if (status && status !== 'all') {
+            where.status = status;
+        }
+        const bookings = await this.prisma.hotelBooking.findMany({
+            where,
+            include: {
+                hotel: {
+                    select: {
+                        id: true,
+                        name: true,
+                        city: { select: { name: true } },
+                    },
+                },
+                room_type: {
+                    select: {
+                        id: true,
+                        name: true,
+                    },
+                },
+                user: {
+                    select: {
+                        id: true,
+                        full_name: true,
+                        email: true,
+                    },
+                },
+            },
+            orderBy: { created_at: 'desc' },
+        });
+        const formattedBookings = bookings.map((booking) => {
+            const nights = Math.ceil((booking.check_out.getTime() - booking.check_in.getTime()) / (1000 * 60 * 60 * 24));
+            return {
+                id: booking.id,
+                status: booking.status,
+                hotel: {
+                    id: booking.hotel.id,
+                    name: booking.hotel.name,
+                    city: booking.hotel.city.name,
+                },
+                room_type: {
+                    id: booking.room_type.id,
+                    name: booking.room_type.name,
+                },
+                customer: {
+                    id: booking.user.id,
+                    name: booking.user.full_name,
+                    email: booking.user.email,
+                },
+                dates: {
+                    check_in: booking.check_in.toISOString().split('T')[0],
+                    check_out: booking.check_out.toISOString().split('T')[0],
+                    nights: nights,
+                },
+                quantity: booking.quantity,
+                total_amount: parseFloat(booking.total_amount.toString()),
+                manager_earnings: parseFloat(booking.total_amount.toString()) * 0.95,
+                currency: booking.currency,
+                created_at: booking.created_at.toISOString(),
+            };
+        });
+        return {
+            data: formattedBookings,
+            total: formattedBookings.length,
+        };
+    }
+    async getManagerBookingStats(managerId, dateFrom, dateTo) {
+        const hotels = await this.prisma.hotel.findMany({
+            where: { manager_id: managerId },
+            select: { id: true, name: true },
+        });
+        const hotelIds = hotels.map(h => h.id);
+        if (hotelIds.length === 0) {
+            return {
+                total_bookings: 0,
+                confirmed_bookings: 0,
+                cancelled_bookings: 0,
+                total_revenue: 0,
+                manager_earnings: 0,
+                average_booking_value: 0,
+                bookings_by_hotel: [],
+            };
+        }
+        const where = {
+            hotel_id: { in: hotelIds },
+        };
+        if (dateFrom) {
+            where.created_at = { gte: dateFrom };
+        }
+        if (dateTo) {
+            where.created_at = {
+                ...where.created_at,
+                lte: dateTo,
+            };
+        }
+        const [allBookings, confirmedBookings, cancelledBookings] = await Promise.all([
+            this.prisma.hotelBooking.findMany({
+                where,
+                include: {
+                    hotel: {
+                        select: {
+                            id: true,
+                            name: true,
+                        },
+                    },
+                },
+            }),
+            this.prisma.hotelBooking.findMany({
+                where: {
+                    ...where,
+                    status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
+                },
+                include: {
+                    hotel: {
+                        select: {
+                            id: true,
+                            name: true,
+                        },
+                    },
+                },
+            }),
+            this.prisma.hotelBooking.findMany({
+                where: {
+                    ...where,
+                    status: 'CANCELLED',
+                },
+            }),
+        ]);
+        const totalRevenue = allBookings
+            .filter(b => ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'].includes(b.status))
+            .reduce((sum, b) => sum + parseFloat(b.total_amount.toString()), 0);
+        const managerEarnings = totalRevenue * 0.95;
+        const averageBookingValue = confirmedBookings.length > 0
+            ? totalRevenue / confirmedBookings.length
+            : 0;
+        const bookingsByHotel = {};
+        for (const booking of confirmedBookings) {
+            const hotelName = booking.hotel.name;
+            if (!bookingsByHotel[hotelName]) {
+                bookingsByHotel[hotelName] = {
+                    hotel_id: booking.hotel.id,
+                    hotel_name: hotelName,
+                    count: 0,
+                    revenue: 0,
+                };
+            }
+            bookingsByHotel[hotelName].count++;
+            bookingsByHotel[hotelName].revenue += parseFloat(booking.total_amount.toString());
+        }
+        return {
+            total_bookings: allBookings.length,
+            confirmed_bookings: confirmedBookings.length,
+            cancelled_bookings: cancelledBookings.length,
+            total_revenue: totalRevenue,
+            manager_earnings: managerEarnings,
+            average_booking_value: averageBookingValue,
+            bookings_by_hotel: Object.values(bookingsByHotel).map(h => ({
+                ...h,
+                manager_earnings: h.revenue * 0.95,
+            })),
+        };
+    }
 };
 exports.BookingsService = BookingsService;
 exports.BookingsService = BookingsService = __decorate([
     (0, common_1.Injectable)(),
-    __metadata("design:paramtypes", [prisma_service_1.PrismaService])
+    __metadata("design:paramtypes", [prisma_service_1.PrismaService,
+        notifications_service_1.NotificationsService])
 ], BookingsService);
 //# sourceMappingURL=bookings.service.js.map

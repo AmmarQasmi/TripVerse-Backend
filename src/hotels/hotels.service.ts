@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 
@@ -40,7 +40,14 @@ export class HotelsService {
 			: [];
 
 		// Build WHERE conditions
-		const where: any = { is_active: true };
+		// For customer-facing queries, filter by verified manager and listed hotels
+		const where: any = { 
+			is_active: true,
+			is_listed: true,
+			manager: {
+				is_verified: true,
+			},
+		};
 
 		if (city_id) {
 			where.city_id = city_id;
@@ -56,6 +63,12 @@ export class HotelsService {
 				where,
 				include: {
 					city: { select: { id: true, name: true, region: true } },
+					manager: {
+						select: {
+							id: true,
+							is_verified: true,
+						},
+					},
 					images: {
 						orderBy: { display_order: 'asc' },
 						take: 1, // Primary image only
@@ -130,11 +143,17 @@ export class HotelsService {
 	/**
 	 * Get single hotel with complete details
 	 */
-	async findOne(id: number) {
+	async findOne(id: number, isAdmin: boolean = false) {
 		const hotel = await this.prisma.hotel.findUnique({
 			where: { id },
 			include: {
 				city: { select: { id: true, name: true, region: true } },
+				manager: {
+					select: {
+						id: true,
+						is_verified: true,
+					},
+				},
 				images: { orderBy: { display_order: 'asc' } },
 				roomTypes: {
 					where: { is_active: true },
@@ -145,6 +164,13 @@ export class HotelsService {
 
 		if (!hotel || !hotel.is_active) {
 			throw new NotFoundException('Hotel not found');
+		}
+
+		// For customer-facing queries, check manager verification and listing status
+		if (!isAdmin) {
+			if (!hotel.manager || !hotel.manager.is_verified || !hotel.is_listed) {
+				throw new NotFoundException('Hotel not found');
+			}
 		}
 
 		return {
@@ -172,9 +198,9 @@ export class HotelsService {
 	}
 
 	/**
-	 * Create new hotel (Admin only)
+	 * Create new hotel (Hotel Manager only, must be verified)
 	 */
-	async create(data: any) {
+	async create(data: any, managerId?: number) {
 		// Validate city exists
 		const city = await this.prisma.city.findUnique({
 			where: { id: data.city_id },
@@ -182,6 +208,21 @@ export class HotelsService {
 
 		if (!city) {
 			throw new NotFoundException('City not found');
+		}
+
+		// If managerId is provided, verify the manager is verified
+		if (managerId) {
+			const hotelManager = await this.prisma.hotelManager.findUnique({
+				where: { id: managerId },
+			});
+
+			if (!hotelManager) {
+				throw new NotFoundException('Hotel manager not found');
+			}
+
+			if (!hotelManager.is_verified) {
+				throw new ForbiddenException('Hotel manager must be verified before creating hotels');
+			}
 		}
 
 		// Validate room type names if provided
@@ -202,11 +243,13 @@ export class HotelsService {
 				data: {
 					name: data.name,
 					city_id: data.city_id,
+					manager_id: managerId || null,
 					description: data.description,
 					address: data.address,
 					star_rating: data.star_rating || 4,
 					amenities: data.amenities || [],
 					is_active: true,
+					is_listed: false, // Hotels are not listed by default, manager must enable
 				},
 			});
 
@@ -251,13 +294,29 @@ export class HotelsService {
 	}
 
 	/**
-	 * Update hotel
+	 * Update hotel (Admin or Hotel Manager - must own the hotel)
 	 */
-	async update(id: number, data: any) {
-		const hotel = await this.prisma.hotel.findUnique({ where: { id } });
+	async update(id: number, data: any, managerId?: number, isAdmin: boolean = false) {
+		const hotel = await this.prisma.hotel.findUnique({ 
+			where: { id },
+			include: {
+				manager: {
+					select: {
+						id: true,
+					},
+				},
+			},
+		});
 
 		if (!hotel) {
 			throw new NotFoundException('Hotel not found');
+		}
+
+		// Check ownership: manager can only update their own hotels, admin can update any
+		if (!isAdmin && managerId) {
+			if (hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only update your own hotels');
+			}
 		}
 
 		const updated = await this.prisma.hotel.update({
@@ -279,13 +338,29 @@ export class HotelsService {
 	}
 
 	/**
-	 * Soft delete hotel
+	 * Soft delete hotel (Admin or Hotel Manager - must own the hotel)
 	 */
-	async remove(id: number) {
-		const hotel = await this.prisma.hotel.findUnique({ where: { id } });
+	async remove(id: number, managerId?: number, isAdmin: boolean = false) {
+		const hotel = await this.prisma.hotel.findUnique({ 
+			where: { id },
+			include: {
+				manager: {
+					select: {
+						id: true,
+					},
+				},
+			},
+		});
 
 		if (!hotel) {
 			throw new NotFoundException('Hotel not found');
+		}
+
+		// Check ownership: manager can only delete their own hotels, admin can delete any
+		if (!isAdmin && managerId) {
+			if (hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only delete your own hotels');
+			}
 		}
 
 		await this.prisma.hotel.update({
@@ -297,13 +372,29 @@ export class HotelsService {
 	}
 
 	/**
-	 * Add room type to hotel
+	 * Add room type to hotel (Admin or Hotel Manager - must own the hotel)
 	 */
-	async addRoomType(hotelId: number, data: any) {
-		const hotel = await this.prisma.hotel.findUnique({ where: { id: hotelId } });
+	async addRoomType(hotelId: number, data: any, managerId?: number, isAdmin: boolean = false) {
+		const hotel = await this.prisma.hotel.findUnique({ 
+			where: { id: hotelId },
+			include: {
+				manager: {
+					select: {
+						id: true,
+					},
+				},
+			},
+		});
 
 		if (!hotel || !hotel.is_active) {
 			throw new NotFoundException('Hotel not found');
+		}
+
+		// Check ownership
+		if (!isAdmin && managerId) {
+			if (hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only add room types to your own hotels');
+			}
 		}
 
 		// Validate room type name
@@ -336,15 +427,33 @@ export class HotelsService {
 	}
 
 	/**
-	 * Update room type
+	 * Update room type (Admin or Hotel Manager - must own the hotel)
 	 */
-	async updateRoomType(hotelId: number, roomId: number, data: any) {
+	async updateRoomType(hotelId: number, roomId: number, data: any, managerId?: number, isAdmin: boolean = false) {
 		const roomType = await this.prisma.hotelRoomType.findFirst({
 			where: { id: roomId, hotel_id: hotelId },
+			include: {
+				hotel: {
+					include: {
+						manager: {
+							select: {
+								id: true,
+							},
+						},
+					},
+				},
+			},
 		});
 
 		if (!roomType) {
 			throw new NotFoundException('Room type not found');
+		}
+
+		// Check ownership
+		if (!isAdmin && managerId) {
+			if (roomType.hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only update room types for your own hotels');
+			}
 		}
 
 		// Validate room type name if being updated
@@ -377,15 +486,33 @@ export class HotelsService {
 	}
 
 	/**
-	 * Delete room type
+	 * Delete room type (Admin or Hotel Manager - must own the hotel)
 	 */
-	async removeRoomType(hotelId: number, roomId: number) {
+	async removeRoomType(hotelId: number, roomId: number, managerId?: number, isAdmin: boolean = false) {
 		const roomType = await this.prisma.hotelRoomType.findFirst({
 			where: { id: roomId, hotel_id: hotelId },
+			include: {
+				hotel: {
+					include: {
+						manager: {
+							select: {
+								id: true,
+							},
+						},
+					},
+				},
+			},
 		});
 
 		if (!roomType) {
 			throw new NotFoundException('Room type not found');
+		}
+
+		// Check ownership
+		if (!isAdmin && managerId) {
+			if (roomType.hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only delete room types from your own hotels');
+			}
 		}
 
 		await this.prisma.hotelRoomType.update({
@@ -397,13 +524,29 @@ export class HotelsService {
 	}
 
 	/**
-	 * Add images to hotel
+	 * Add images to hotel (Admin or Hotel Manager - must own the hotel)
 	 */
-	async addImages(hotelId: number, imageUrls: string[]) {
-		const hotel = await this.prisma.hotel.findUnique({ where: { id: hotelId } });
+	async addImages(hotelId: number, imageUrls: string[], managerId?: number, isAdmin: boolean = false) {
+		const hotel = await this.prisma.hotel.findUnique({ 
+			where: { id: hotelId },
+			include: {
+				manager: {
+					select: {
+						id: true,
+					},
+				},
+			},
+		});
 
 		if (!hotel || !hotel.is_active) {
 			throw new NotFoundException('Hotel not found');
+		}
+
+		// Check ownership
+		if (!isAdmin && managerId) {
+			if (hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only add images to your own hotels');
+			}
 		}
 
 		// Get current max order
@@ -426,15 +569,33 @@ export class HotelsService {
 	}
 
 	/**
-	 * Delete hotel image
+	 * Delete hotel image (Admin or Hotel Manager - must own the hotel)
 	 */
-	async removeImage(hotelId: number, imageId: number) {
+	async removeImage(hotelId: number, imageId: number, managerId?: number, isAdmin: boolean = false) {
 		const image = await this.prisma.hotelImage.findFirst({
 			where: { id: imageId, hotel_id: hotelId },
+			include: {
+				hotel: {
+					include: {
+						manager: {
+							select: {
+								id: true,
+							},
+						},
+					},
+				},
+			},
 		});
 
 		if (!image) {
 			throw new NotFoundException('Image not found');
+		}
+
+		// Check ownership
+		if (!isAdmin && managerId) {
+			if (image.hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only delete images from your own hotels');
+			}
 		}
 
 		await this.prisma.hotelImage.delete({
@@ -445,13 +606,29 @@ export class HotelsService {
 	}
 
 	/**
-	 * Reorder hotel images
+	 * Reorder hotel images (Admin or Hotel Manager - must own the hotel)
 	 */
-	async reorderImages(hotelId: number, imageIds: number[]) {
-		const hotel = await this.prisma.hotel.findUnique({ where: { id: hotelId } });
+	async reorderImages(hotelId: number, imageIds: number[], managerId?: number, isAdmin: boolean = false) {
+		const hotel = await this.prisma.hotel.findUnique({ 
+			where: { id: hotelId },
+			include: {
+				manager: {
+					select: {
+						id: true,
+					},
+				},
+			},
+		});
 
 		if (!hotel) {
 			throw new NotFoundException('Hotel not found');
+		}
+
+		// Check ownership
+		if (!isAdmin && managerId) {
+			if (hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only reorder images for your own hotels');
+			}
 		}
 
 		// Update display_order for each image
@@ -468,15 +645,29 @@ export class HotelsService {
 	}
 
 	/**
-	 * Upload and add images to hotel using Cloudinary
+	 * Upload and add images to hotel using Cloudinary (Admin or Hotel Manager - must own the hotel)
 	 */
-	async uploadImages(hotelId: number, files: any[]) {
+	async uploadImages(hotelId: number, files: any[], managerId?: number, isAdmin: boolean = false) {
 		const hotel = await this.prisma.hotel.findUnique({ 
-			where: { id: hotelId } 
+			where: { id: hotelId },
+			include: {
+				manager: {
+					select: {
+						id: true,
+					},
+				},
+			},
 		});
 
 		if (!hotel || !hotel.is_active) {
 			throw new NotFoundException('Hotel not found');
+		}
+
+		// Check ownership
+		if (!isAdmin && managerId) {
+			if (hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only upload images to your own hotels');
+			}
 		}
 
 		if (!files || files.length === 0) {
@@ -528,15 +719,33 @@ export class HotelsService {
 	}
 
 	/**
-	 * Delete hotel image from Cloudinary and database
+	 * Delete hotel image from Cloudinary and database (Admin or Hotel Manager - must own the hotel)
 	 */
-	async removeImageWithCloudinary(hotelId: number, imageId: number) {
+	async removeImageWithCloudinary(hotelId: number, imageId: number, managerId?: number, isAdmin: boolean = false) {
 		const image = await this.prisma.hotelImage.findFirst({
 			where: { id: imageId, hotel_id: hotelId },
+			include: {
+				hotel: {
+					include: {
+						manager: {
+							select: {
+								id: true,
+							},
+						},
+					},
+				},
+			},
 		}) as any;
 
 		if (!image) {
 			throw new NotFoundException('Image not found');
+		}
+
+		// Check ownership
+		if (!isAdmin && managerId) {
+			if (image.hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only delete images from your own hotels');
+			}
 		}
 
 		try {
@@ -578,6 +787,172 @@ export class HotelsService {
 					original: image.image_url
 				}
 		}));
+	}
+
+	/**
+	 * Get all hotels for a manager
+	 */
+	async getManagerHotels(managerId: number) {
+		const hotels = await this.prisma.hotel.findMany({
+			where: { manager_id: managerId },
+			include: {
+				city: { select: { id: true, name: true, region: true } },
+				images: {
+					orderBy: { display_order: 'asc' },
+					take: 1,
+				},
+				roomTypes: {
+					where: { is_active: true },
+				},
+				hotelBookings: {
+					where: {
+						status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
+					},
+					select: {
+						id: true,
+						total_amount: true,
+					},
+				},
+			},
+			orderBy: { created_at: 'desc' },
+		});
+
+		return hotels.map(hotel => {
+			const totalEarnings = hotel.hotelBookings.reduce(
+				(sum, booking) => sum + parseFloat(booking.total_amount.toString()),
+				0
+			);
+			const managerEarnings = totalEarnings * 0.95; // 95% to manager
+
+			return {
+				id: hotel.id.toString(),
+				name: hotel.name,
+				description: hotel.description,
+				location: hotel.city.name,
+				address: hotel.address,
+				rating: hotel.star_rating,
+				is_active: hotel.is_active,
+				is_listed: hotel.is_listed,
+				images: hotel.images.map(img => img.image_url),
+				room_types_count: hotel.roomTypes.length,
+				total_bookings: hotel.hotelBookings.length,
+				total_earnings: managerEarnings,
+				created_at: hotel.created_at.toISOString(),
+				updated_at: hotel.updated_at.toISOString(),
+			};
+		});
+	}
+
+	/**
+	 * Update hotel availability/listing status
+	 */
+	async updateHotelAvailability(hotelId: number, managerId: number, data: { is_listed?: boolean }) {
+		const hotel = await this.prisma.hotel.findUnique({
+			where: { id: hotelId },
+			include: {
+				manager: {
+					select: {
+						id: true,
+						is_verified: true,
+					},
+				},
+			},
+		});
+
+		if (!hotel) {
+			throw new NotFoundException('Hotel not found');
+		}
+
+		if (hotel.manager_id !== managerId) {
+			throw new ForbiddenException('You can only update your own hotels');
+		}
+
+		if (!hotel.manager?.is_verified) {
+			throw new ForbiddenException('Hotel manager must be verified to list hotels');
+		}
+
+		const updated = await this.prisma.hotel.update({
+			where: { id: hotelId },
+			data: {
+				is_listed: data.is_listed !== undefined ? data.is_listed : hotel.is_listed,
+			},
+		});
+
+		return {
+			id: updated.id,
+			is_listed: updated.is_listed,
+			message: 'Hotel availability updated successfully',
+		};
+	}
+
+	/**
+	 * Get hotel availability stats
+	 */
+	async getHotelAvailability(hotelId: number, managerId: number) {
+		const hotel = await this.prisma.hotel.findUnique({
+			where: { id: hotelId },
+			include: {
+				manager: {
+					select: {
+						id: true,
+					},
+				},
+				roomTypes: {
+					where: { is_active: true },
+					select: {
+						id: true,
+						name: true,
+						total_rooms: true,
+					},
+				},
+			},
+		});
+
+		if (!hotel) {
+			throw new NotFoundException('Hotel not found');
+		}
+
+		if (hotel.manager_id !== managerId) {
+			throw new ForbiddenException('You can only view availability for your own hotels');
+		}
+
+		const now = new Date();
+		now.setHours(0, 0, 0, 0);
+
+		// Calculate availability for each room type
+		const availability = await Promise.all(
+			hotel.roomTypes.map(async (roomType) => {
+				const bookedBookings = await this.prisma.hotelBooking.findMany({
+					where: {
+						hotel_id: hotelId,
+						room_type_id: roomType.id,
+						status: 'CONFIRMED',
+						check_out: { gte: now },
+					},
+					select: {
+						quantity: true,
+					},
+				});
+
+				const bookedRooms = bookedBookings.reduce((sum, b) => sum + b.quantity, 0);
+				const availableRooms = Math.max(0, roomType.total_rooms - bookedRooms);
+
+				return {
+					room_type_id: roomType.id,
+					room_type_name: roomType.name,
+					total_rooms: roomType.total_rooms,
+					booked_rooms: bookedRooms,
+					available_rooms: availableRooms,
+				};
+			})
+		);
+
+		return {
+			hotel_id: hotelId,
+			hotel_name: hotel.name,
+			is_listed: hotel.is_listed,
+			room_availability: availability,
+		};
 	}
 }
 

@@ -22,7 +22,6 @@ const roles_decorator_1 = require("../common/decorators/roles.decorator");
 const current_user_decorator_1 = require("../common/decorators/current-user.decorator");
 const client_1 = require("@prisma/client");
 const submit_verification_dto_1 = require("./dto/submit-verification.dto");
-const verify_driver_dto_1 = require("./dto/verify-driver.dto");
 const multer_config_1 = require("../common/config/multer.config");
 let DriversController = class DriversController {
     constructor(driversService) {
@@ -36,15 +35,6 @@ let DriversController = class DriversController {
     }
     async submitVerification(user, dto) {
         return this.driversService.submitVerification(user.id, dto);
-    }
-    async getPendingVerifications() {
-        return this.driversService.getPendingVerifications();
-    }
-    async getVerifiedDrivers() {
-        return this.driversService.getVerifiedDrivers();
-    }
-    async verifyDriver(driverId, dto) {
-        return this.driversService.verifyDriver(Number(driverId), dto);
     }
     async uploadDocument(user, file, documentType) {
         if (!file) {
@@ -72,6 +62,20 @@ let DriversController = class DriversController {
     }
     async deleteDocument(user, documentId) {
         return this.driversService.deleteDocument(user.id, documentId);
+    }
+    async getDriverDashboard(user) {
+        return this.driversService.getDriverDashboard(user.id);
+    }
+    async getDriverEarnings(user, dateFrom, dateTo) {
+        const from = dateFrom ? new Date(dateFrom) : undefined;
+        const to = dateTo ? new Date(dateTo) : undefined;
+        return this.driversService.getDriverEarnings(user.id, from, to);
+    }
+    async getEarningsBreakdown(user) {
+        return this.driversService.getEarningsBreakdown(user.id);
+    }
+    async getSuspensionStatus(user) {
+        return this.driversService.getSuspensionStatus(user.id);
     }
 };
 exports.DriversController = DriversController;
@@ -101,32 +105,6 @@ __decorate([
     __metadata("design:returntype", Promise)
 ], DriversController.prototype, "submitVerification", null);
 __decorate([
-    (0, common_1.Get)('verification/pending'),
-    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
-    (0, roles_decorator_1.Roles)(client_1.Role.admin),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", []),
-    __metadata("design:returntype", Promise)
-], DriversController.prototype, "getPendingVerifications", null);
-__decorate([
-    (0, common_1.Get)('verification/verified'),
-    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
-    (0, roles_decorator_1.Roles)(client_1.Role.admin),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", []),
-    __metadata("design:returntype", Promise)
-], DriversController.prototype, "getVerifiedDrivers", null);
-__decorate([
-    (0, common_1.Put)('verification/:driverId'),
-    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
-    (0, roles_decorator_1.Roles)(client_1.Role.admin),
-    __param(0, (0, common_1.Param)('driverId')),
-    __param(1, (0, common_1.Body)()),
-    __metadata("design:type", Function),
-    __metadata("design:paramtypes", [String, verify_driver_dto_1.VerifyDriverDto]),
-    __metadata("design:returntype", Promise)
-], DriversController.prototype, "verifyDriver", null);
-__decorate([
     (0, common_1.Post)('documents/upload'),
     (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
     (0, roles_decorator_1.Roles)(client_1.Role.driver),
@@ -148,6 +126,44 @@ __decorate([
     __metadata("design:paramtypes", [Object, Number]),
     __metadata("design:returntype", Promise)
 ], DriversController.prototype, "deleteDocument", null);
+__decorate([
+    (0, common_1.Get)('dashboard'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.driver),
+    __param(0, (0, current_user_decorator_1.CurrentUser)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object]),
+    __metadata("design:returntype", Promise)
+], DriversController.prototype, "getDriverDashboard", null);
+__decorate([
+    (0, common_1.Get)('earnings'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.driver),
+    __param(0, (0, current_user_decorator_1.CurrentUser)()),
+    __param(1, (0, common_1.Query)('date_from')),
+    __param(2, (0, common_1.Query)('date_to')),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object, String, String]),
+    __metadata("design:returntype", Promise)
+], DriversController.prototype, "getDriverEarnings", null);
+__decorate([
+    (0, common_1.Get)('earnings/breakdown'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.driver),
+    __param(0, (0, current_user_decorator_1.CurrentUser)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object]),
+    __metadata("design:returntype", Promise)
+], DriversController.prototype, "getEarningsBreakdown", null);
+__decorate([
+    (0, common_1.Get)('suspension-status'),
+    (0, common_1.UseGuards)(auth_guard_1.JwtAuthGuard, roles_guard_1.RolesGuard),
+    (0, roles_decorator_1.Roles)(client_1.Role.driver),
+    __param(0, (0, current_user_decorator_1.CurrentUser)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Object]),
+    __metadata("design:returntype", Promise)
+], DriversController.prototype, "getSuspensionStatus", null);
 exports.DriversController = DriversController = __decorate([
     (0, common_1.Controller)('drivers'),
     __metadata("design:paramtypes", [drivers_service_1.DriversService])

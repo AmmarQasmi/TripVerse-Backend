@@ -1,12 +1,17 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Inject, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
+import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
+import { AdminService } from '../admin/admin.service';
 
 @Injectable()
 export class CarsService {
 	constructor(
 		private prisma: PrismaService,
-		private cloudinaryService: CloudinaryService
+		private cloudinaryService: CloudinaryService,
+		private notificationsService: CommonNotificationsService,
+		@Inject(forwardRef(() => AdminService))
+		private adminService: AdminService,
 	) {}
 
 	/**
@@ -401,19 +406,12 @@ export class CarsService {
 			},
 		});
 
-		// TODO: Send notification to driver
-		// await this.notifyDriver(booking.car.driver.user.id, {
-		//   type: 'new_booking_request',
-		//   booking_id: booking.id,
-		//   customer_name: booking.user.full_name,
-		//   trip_details: {
-		//     pickup: pickup_location,
-		//     dropoff: dropoff_location,
-		//     start_date: start_date,
-		//     end_date: end_date,
-		//     total_earnings: booking.driver_earnings,
-		//   },
-		// });
+		// Send notification to driver
+		await this.notificationsService.notifyBookingRequest(
+			booking.car.driver.user.id,
+			booking.id,
+			booking.user.full_name,
+		);
 
 		return {
 			id: booking.id,
@@ -446,7 +444,16 @@ export class CarsService {
 			include: {
 				car: {
 					include: {
-						driver: true,
+						driver: {
+							include: {
+								user: {
+									select: {
+										id: true,
+										full_name: true,
+									},
+								},
+							},
+						},
 					},
 				},
 				user: true,
@@ -475,21 +482,21 @@ export class CarsService {
 			},
 		});
 
-		// TODO: Send notification to customer
-		// if (response === 'accept') {
-		//   await this.notifyCustomer(booking.user_id, {
-		//     type: 'driver_accepted',
-		//     booking_id: booking.id,
-		//     driver_name: booking.car.driver.user.full_name,
-		//     payment_amount: parseFloat(booking.total_amount.toString()),
-		//   });
-		// } else {
-		//   await this.notifyCustomer(booking.user_id, {
-		//     type: 'driver_rejected',
-		//     booking_id: booking.id,
-		//     message: 'Driver is not available for this trip.',
-		//   });
-		// }
+		// Send notification to customer
+		const driverName = booking.car.driver.user?.full_name || 'Driver';
+		if (response === 'accept') {
+			await this.notificationsService.notifyBookingAccepted(
+				booking.user_id,
+				bookingId,
+				driverName,
+			);
+		} else {
+			await this.notificationsService.notifyBookingRejected(
+				booking.user_id,
+				bookingId,
+				driverName,
+			);
+		}
 
 		return {
 			id: updatedBooking.id,
@@ -585,18 +592,13 @@ export class CarsService {
 			},
 		});
 
-		// TODO: Send confirmation notifications
-		// await this.notifyCustomer(booking.user_id, {
-		//   type: 'booking_confirmed',
-		//   booking_id: booking.id,
-		//   message: 'Your booking has been confirmed!',
-		// });
-
-		// await this.notifyDriver(booking.car.driver.user_id, {
-		//   type: 'booking_confirmed',
-		//   booking_id: booking.id,
-		//   message: 'Booking confirmed! Payment received.',
-		// });
+		// Send confirmation notifications
+		await this.notificationsService.notifyBookingConfirmed(booking.user_id, bookingId, 'car');
+		await this.notificationsService.notifyBookingConfirmed(
+			booking.car.driver.user_id,
+			bookingId,
+			'car',
+		);
 
 		return {
 			id: updatedBooking.id,
@@ -720,7 +722,16 @@ export class CarsService {
 			include: {
 				car: {
 					include: {
-						driver: true,
+						driver: {
+							include: {
+								user: {
+									select: {
+										id: true,
+										full_name: true,
+									},
+								},
+							},
+						},
 					},
 				},
 				user: true,
@@ -766,12 +777,9 @@ export class CarsService {
 			},
 		});
 
-		// TODO: Send notification to customer
-		// await this.notifyCustomer(booking.user_id, {
-		//   type: 'trip_started',
-		//   booking_id: booking.id,
-		//   message: 'Your trip has started!',
-		// });
+		// Send notification to customer
+		const driverName = booking.car.driver.user?.full_name || 'Driver';
+		await this.notificationsService.notifyTripStarted(booking.user_id, bookingId, driverName);
 
 		return {
 			id: updatedBooking.id,
@@ -817,12 +825,39 @@ export class CarsService {
 			},
 		});
 
-		// TODO: Send completion notifications
-		// await this.notifyCustomer(booking.user_id, {
-		//   type: 'trip_completed',
-		//   booking_id: booking.id,
-		//   message: 'Your trip has been completed successfully!',
-		// });
+		// Send completion notification
+		const bookingWithUser = await this.prisma.carBooking.findUnique({
+			where: { id: bookingId },
+			include: {
+				car: {
+					include: {
+						driver: {
+							include: {
+								user: true,
+							},
+						},
+					},
+				},
+			},
+		});
+
+		if (bookingWithUser) {
+			const driverName = bookingWithUser.car.driver.user?.full_name || 'Driver';
+			await this.notificationsService.notifyTripCompleted(
+				bookingWithUser.user_id,
+				bookingId,
+				driverName,
+			);
+
+			// Resume any paused suspensions/bans after trip completion
+			const driverId = bookingWithUser.car.driver_id;
+			try {
+				await this.adminService.resumeSuspensionAfterRide(driverId, bookingId);
+			} catch (error) {
+				// Log error but don't fail trip completion
+				console.error('Error resuming suspension after ride:', error);
+			}
+		}
 
 		return {
 			id: updatedBooking.id,

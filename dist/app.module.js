@@ -9,6 +9,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AppModule = void 0;
 const common_1 = require("@nestjs/common");
 const config_1 = require("@nestjs/config");
+const schedule_1 = require("@nestjs/schedule");
 const prisma_module_1 = require("./prisma/prisma.module");
 const auth_module_1 = require("./auth/auth.module");
 const users_module_1 = require("./users/users.module");
@@ -16,6 +17,7 @@ const cities_module_1 = require("./cities/cities.module");
 const hotels_module_1 = require("./hotels/hotels.module");
 const cars_module_1 = require("./cars/cars.module");
 const drivers_module_1 = require("./drivers/drivers.module");
+const hotel_managers_module_1 = require("./hotel-managers/hotel-managers.module");
 const bookings_module_1 = require("./bookings/bookings.module");
 const payments_module_1 = require("./payments/payments.module");
 const monuments_module_1 = require("./monuments/monuments.module");
@@ -23,6 +25,7 @@ const weather_module_1 = require("./weather/weather.module");
 const admin_module_1 = require("./admin/admin.module");
 const cloudinary_module_1 = require("./common/cloudinary/cloudinary.module");
 const upload_module_1 = require("./common/upload/upload.module");
+const notifications_module_1 = require("./notifications/notifications.module");
 let AppModule = class AppModule {
 };
 exports.AppModule = AppModule;
@@ -33,6 +36,7 @@ exports.AppModule = AppModule = __decorate([
                 isGlobal: true,
                 envFilePath: '.env',
             }),
+            schedule_1.ScheduleModule.forRoot(),
             prisma_module_1.PrismaModule,
             cloudinary_module_1.CloudinaryModule,
             auth_module_1.AuthModule,
@@ -41,12 +45,14 @@ exports.AppModule = AppModule = __decorate([
             hotels_module_1.HotelsModule,
             cars_module_1.CarsModule,
             drivers_module_1.DriversModule,
+            hotel_managers_module_1.HotelManagersModule,
             bookings_module_1.BookingsModule,
             payments_module_1.PaymentsModule,
             monuments_module_1.MonumentsModule,
             weather_module_1.WeatherModule,
             admin_module_1.AdminModule,
             upload_module_1.UploadModule,
+            notifications_module_1.NotificationsModule,
         ],
     })
 ], AppModule);

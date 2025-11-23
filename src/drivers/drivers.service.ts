@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
+import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 import { SubmitVerificationDto } from './dto/submit-verification.dto';
 import { VerifyDriverDto } from './dto/verify-driver.dto';
 
@@ -9,6 +10,7 @@ export class DriversService {
 	constructor(
 		private prisma: PrismaService,
 		private cloudinaryService: CloudinaryService,
+		private notificationsService: CommonNotificationsService,
 	) {}
 
 	// Driver submits verification documents
@@ -104,6 +106,27 @@ export class DriversService {
 			}
 		}
 
+		// Check if driver was previously rejected (has verification_notes)
+		const wasRejected = driver.verification_notes && !driver.is_verified;
+		
+		// Check if all documents are now pending (re-uploaded after rejection)
+		const allDocuments = await this.prisma.driverDocument.findMany({
+			where: { driver_id: driver.id },
+		});
+		const allDocsPending = allDocuments.length > 0 && 
+			allDocuments.every(doc => doc.status === 'pending');
+
+		// If driver was previously rejected and is now re-submitting, clear verification_notes
+		// This indicates a fresh submission after addressing rejection
+		if (wasRejected && allDocsPending) {
+			await this.prisma.driver.update({
+				where: { id: driver.id },
+				data: {
+					verification_notes: null,
+				},
+			});
+		}
+
 		// Get updated driver with documents and ratings
 		const updatedDriver = await this.prisma.driver.findUnique({
 			where: { id: driver.id },
@@ -126,6 +149,19 @@ export class DriversService {
 				},
 			},
 		});
+
+		if (!updatedDriver) {
+			throw new NotFoundException('Driver not found after submission');
+		}
+
+		// Notify all admins about the verification submission
+		if (updatedDriver.user) {
+			await this.notificationsService.notifyAdminsOfVerificationSubmission(
+				'driver',
+				updatedDriver.user.full_name,
+				updatedDriver.user.email,
+			);
+		}
 
 		return {
 			message: 'Verification documents submitted successfully. Awaiting admin approval.',
@@ -205,6 +241,19 @@ export class DriversService {
 				},
 				data: {
 					verified_at: new Date(),
+				},
+			});
+		} else {
+			// Reject all pending documents if driver verification is rejected
+			await this.prisma.driverDocument.updateMany({
+				where: {
+					driver_id: driverId,
+					status: 'pending',
+				},
+				data: {
+					status: 'rejected',
+					rejection_reason: dto.verification_notes || 'Verification rejected by admin',
+					reviewed_at: new Date(),
 				},
 			});
 		}
@@ -410,6 +459,291 @@ export class DriversService {
 		} catch (error) {
 			throw new BadRequestException('Failed to delete document');
 		}
+	}
+
+	/**
+	 * Get driver dashboard summary - optimized with parallel queries
+	 */
+	async getDriverDashboard(userId: number) {
+		const driver = await this.prisma.driver.findFirst({
+			where: { user_id: userId },
+			select: {
+				id: true,
+				is_verified: true,
+				verified_at: true,
+			},
+		});
+
+		if (!driver) {
+			throw new NotFoundException('Driver profile not found');
+		}
+
+		// Optimize: Run all queries in parallel
+		const [
+			incomingRequests,
+			confirmedBookings,
+			earningsResult,
+			carsCount,
+			activeCarsCount,
+			recentBookings,
+		] = await Promise.all([
+			// Incoming booking requests
+			this.prisma.carBooking.count({
+				where: {
+					car: { driver_id: driver.id },
+					status: 'PENDING_DRIVER_ACCEPTANCE',
+				},
+			}),
+			// Confirmed bookings
+			this.prisma.carBooking.count({
+				where: {
+					car: { driver_id: driver.id },
+					status: { in: ['ACCEPTED', 'CONFIRMED', 'IN_PROGRESS'] },
+				},
+			}),
+			// Total earnings
+			this.prisma.carBooking.aggregate({
+				where: {
+					car: { driver_id: driver.id },
+					status: 'COMPLETED',
+				},
+				_sum: { driver_earnings: true },
+			}),
+			// Total cars count
+			this.prisma.car.count({
+				where: { driver_id: driver.id },
+			}),
+			// Active cars count
+			this.prisma.car.count({
+				where: { driver_id: driver.id, is_active: true },
+			}),
+			// Recent bookings (last 5)
+			this.prisma.carBooking.findMany({
+				where: { car: { driver_id: driver.id } },
+				include: {
+					user: { select: { id: true, full_name: true } },
+					car: { include: { carModel: true } },
+				},
+				orderBy: { created_at: 'desc' },
+				take: 5,
+			}),
+		]);
+
+		const totalEarnings = parseFloat(earningsResult._sum.driver_earnings?.toString() || '0');
+
+		return {
+			verification_status: {
+				is_verified: driver.is_verified,
+				verified_at: driver.verified_at?.toISOString() || null,
+			},
+			stats: {
+				incoming_requests: incomingRequests,
+				confirmed_bookings: confirmedBookings,
+				total_earnings: totalEarnings,
+				car_listings_count: carsCount,
+				active_cars_count: activeCarsCount,
+			},
+			recent_bookings: recentBookings.map((booking) => ({
+				id: booking.id,
+				status: booking.status,
+				customer: {
+					name: booking.user.full_name,
+				},
+				car: {
+					make: booking.car.carModel.make,
+					model: booking.car.carModel.model,
+				},
+				start_date: booking.start_date.toISOString().split('T')[0],
+				end_date: booking.end_date.toISOString().split('T')[0],
+				driver_earnings: parseFloat(booking.driver_earnings.toString()),
+				created_at: booking.created_at.toISOString(),
+			})),
+		};
+	}
+
+	/**
+	 * Get driver earnings summary
+	 */
+	async getDriverEarnings(userId: number, dateFrom?: Date, dateTo?: Date) {
+		const driver = await this.prisma.driver.findFirst({
+			where: { user_id: userId },
+		});
+
+		if (!driver) {
+			throw new NotFoundException('Driver profile not found');
+		}
+
+		const where: any = {
+			car: {
+				driver_id: driver.id,
+			},
+			status: 'COMPLETED',
+		};
+
+		if (dateFrom) {
+			where.completed_at = { gte: dateFrom };
+		}
+		if (dateTo) {
+			where.completed_at = {
+				...where.completed_at,
+				lte: dateTo,
+			};
+		}
+
+		const earningsResult = await this.prisma.carBooking.aggregate({
+			where,
+			_sum: {
+				driver_earnings: true,
+			},
+			_count: true,
+		});
+
+		const bookings = await this.prisma.carBooking.findMany({
+			where,
+			include: {
+				car: {
+					include: {
+						carModel: true,
+					},
+				},
+				user: {
+					select: {
+						full_name: true,
+					},
+				},
+			},
+			orderBy: { completed_at: 'desc' },
+		});
+
+		return {
+			total_earnings: parseFloat(earningsResult._sum.driver_earnings?.toString() || '0'),
+			total_completed_bookings: earningsResult._count,
+			currency: 'USD',
+			bookings: bookings.map((booking) => ({
+				id: booking.id,
+				customer_name: booking.user.full_name,
+				car: `${booking.car.carModel.make} ${booking.car.carModel.model}`,
+				driver_earnings: parseFloat(booking.driver_earnings.toString()),
+				completed_at: booking.completed_at?.toISOString() || null,
+			})),
+		};
+	}
+
+	/**
+	 * Get earnings breakdown by month and by car
+	 */
+	async getEarningsBreakdown(userId: number) {
+		const driver = await this.prisma.driver.findFirst({
+			where: { user_id: userId },
+		});
+
+		if (!driver) {
+			throw new NotFoundException('Driver profile not found');
+		}
+
+		// Get all completed bookings
+		const bookings = await this.prisma.carBooking.findMany({
+			where: {
+				car: {
+					driver_id: driver.id,
+				},
+				status: 'COMPLETED',
+				completed_at: { not: null },
+			},
+			include: {
+				car: {
+					include: {
+						carModel: true,
+					},
+				},
+			},
+		});
+
+		// Group by month
+		const byMonth: Record<string, number> = {};
+		bookings.forEach((booking) => {
+			if (booking.completed_at) {
+				const month = booking.completed_at.toISOString().substring(0, 7); // YYYY-MM
+				byMonth[month] = (byMonth[month] || 0) + parseFloat(booking.driver_earnings.toString());
+			}
+		});
+
+		// Group by car
+		const byCar: Record<number, { car: string; earnings: number; bookings: number }> = {};
+		bookings.forEach((booking) => {
+			const carId = booking.car_id;
+			const carName = `${booking.car.carModel.make} ${booking.car.carModel.model}`;
+			if (!byCar[carId]) {
+				byCar[carId] = {
+					car: carName,
+					earnings: 0,
+					bookings: 0,
+				};
+			}
+			byCar[carId].earnings += parseFloat(booking.driver_earnings.toString());
+			byCar[carId].bookings += 1;
+		});
+
+		return {
+			by_month: Object.entries(byMonth).map(([month, earnings]) => ({
+				month,
+				earnings,
+			})),
+			by_car: Object.values(byCar),
+		};
+	}
+
+	/**
+	 * Get driver suspension status
+	 */
+	async getSuspensionStatus(userId: number) {
+		const driver = await this.prisma.driver.findFirst({
+			where: { user_id: userId },
+			include: {
+				user: true,
+				currentSuspension: true,
+				disciplinary_actions: {
+					where: {
+						period_end: { gte: new Date() },
+					},
+					orderBy: { created_at: 'desc' },
+					take: 1,
+				},
+			},
+		});
+
+		if (!driver) {
+			throw new NotFoundException('Driver profile not found');
+		}
+
+		const isSuspended = driver.user.status === 'inactive';
+		const isBanned = driver.user.status === 'banned';
+		const currentAction = driver.currentSuspension || driver.disciplinary_actions[0];
+
+		// Count disputes in current period
+		const periodStart = currentAction
+			? new Date(currentAction.period_start)
+			: new Date(new Date().setMonth(new Date().getMonth() - 3));
+
+		const disputeCount = await this.prisma.dispute.count({
+			where: {
+				bookingCar: {
+					car: { driver_id: driver.id },
+				},
+				created_at: { gte: periodStart },
+			},
+		});
+
+		return {
+			is_suspended: isSuspended,
+			is_banned: isBanned,
+			is_paused: currentAction?.is_paused || false,
+			suspension_type: currentAction?.action_type,
+			dispute_count: disputeCount,
+			suspension_end_date: currentAction?.scheduled_end?.toISOString(),
+			pause_reason: currentAction?.pause_reason,
+			warning_sent: !!driver.last_warning_at,
+		};
 	}
 }
 
