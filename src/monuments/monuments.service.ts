@@ -3,7 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 import { GoogleVisionService, LandmarkDetectionResult } from '../common/services/google-vision.service';
 import { WikipediaService, WikipediaResult } from '../common/services/wikipedia.service';
-import { LobstrService, LobstrResult } from '../common/services/lobstr.service';
+import { GooglePlacesService, GooglePlacesResult } from '../common/services/google-places.service';
 import { MonumentRecognition } from '@prisma/client';
 
 export interface PlaceResult {
@@ -68,7 +68,7 @@ export class MonumentsService {
     private cloudinaryService: CloudinaryService,
     private googleVisionService: GoogleVisionService,
     private wikipediaService: WikipediaService,
-    private lobstrService: LobstrService,
+    private googlePlacesService: GooglePlacesService,
   ) {}
 
   /**
@@ -137,27 +137,17 @@ export class MonumentsService {
         this.logger.warn('Wikipedia enrichment failed:', (error as Error).message);
       }
 
-      // Submit async job to Lobstr.io for review scraping if location is available
-      let lobstrRunHash: string | null = null;
-      if (bestLandmark.location) {
-        try {
-          // Automatically get or create squid for Google Reviews
-          const squidId = await this.lobstrService.getOrCreateSquid();
-          if (squidId) {
-            lobstrRunHash = await this.lobstrService.scrapePlaceReviews(
-              bestLandmark.name,
-              undefined, // placeId not available from Vision API
-              squidId
-            );
-            if (lobstrRunHash) {
-              this.logger.log(`Submitted Lobstr.io review scraping job: ${lobstrRunHash}`);
-            }
-          } else {
-            this.logger.warn('Failed to get/create Lobstr.io squid, skipping review scraping');
-          }
-        } catch (error) {
-          this.logger.warn('Lobstr.io review scraping submission failed:', (error as Error).message);
+      // Fetch Google Places data using place name only
+      let placeDetails: GooglePlacesResult | null = null;
+      try {
+        placeDetails = await this.googlePlacesService.searchPlace(bestLandmark.name);
+        if (placeDetails) {
+          this.logger.log(`Found Google Places data for: ${placeDetails.name}`);
+        } else {
+          this.logger.warn('No Google Places data found for monument');
         }
+      } catch (error) {
+        this.logger.warn('Google Places API call failed:', (error as Error).message);
       }
 
       // Save recognition result to database
@@ -171,10 +161,13 @@ export class MonumentsService {
           raw_payload_json: {
             landmarks: landmarks as any,
             wikipedia: wikipediaData as any,
-            lobstr: {
-              runHash: lobstrRunHash,
-              status: lobstrRunHash ? 'pending' : null,
-            },
+            googlePlaces: placeDetails ? {
+              place_id: placeDetails.place_id,
+              name: placeDetails.name,
+              formatted_address: placeDetails.formatted_address,
+              rating: placeDetails.rating,
+              user_ratings_total: placeDetails.user_ratings_total,
+            } : null,
             vision: {
               location: bestLandmark.location,
               boundingPoly: bestLandmark.boundingPoly,
@@ -193,7 +186,25 @@ export class MonumentsService {
         wikiSnippet: recognition.wiki_snippet || undefined,
         wikipediaUrl: wikipediaData?.url,
         coordinates: bestLandmark.location,
-        placeDetails: undefined, // Will be fetched later via getMonumentReviews
+        placeDetails: placeDetails ? {
+          place_id: placeDetails.place_id,
+          name: placeDetails.name,
+          formatted_address: placeDetails.formatted_address,
+          rating: placeDetails.rating,
+          user_ratings_total: placeDetails.user_ratings_total,
+          reviews: placeDetails.reviews?.map(review => ({
+            author_name: review.author_name,
+            author_url: review.author_url,
+            rating: review.rating,
+            text: review.text,
+            time: review.time,
+            relative_time_description: review.relative_time_description,
+          })),
+          geometry: placeDetails.geometry,
+          website: placeDetails.website,
+          international_phone_number: placeDetails.international_phone_number,
+          opening_hours: placeDetails.opening_hours,
+        } : undefined,
         rawData: recognition.raw_payload_json,
         createdAt: recognition.created_at,
       };
@@ -281,7 +292,7 @@ export class MonumentsService {
   }
 
   /**
-   * Get monument reviews from Lobstr.io (async polling)
+   * Get monument reviews from Google Places API
    */
   async getMonumentReviews(userId: number, recognitionId: number): Promise<{
     reviews?: PlaceResult['reviews'];
@@ -302,14 +313,7 @@ export class MonumentsService {
     }
 
     const rawData = recognition.raw_payload_json as any;
-    const lobstrData = rawData?.lobstr;
-
-    // If no Lobstr run hash, reviews were never requested
-    if (!lobstrData?.runHash) {
-      return {
-        status: 'not_started',
-      };
-    }
+    const googlePlacesData = rawData?.googlePlaces;
 
     // Check if reviews are already fetched and stored
     if (rawData?.placeDetails && rawData.placeDetails.reviews) {
@@ -322,104 +326,128 @@ export class MonumentsService {
       };
     }
 
-    // Poll Lobstr.io for run status
-    try {
-      const runStatus = await this.lobstrService.checkRunStatus(lobstrData.runHash);
-      
-      if (!runStatus) {
-        return {
-          status: 'failed',
-        };
-      }
-
-      if (runStatus.status === 'pending' || runStatus.status === 'running') {
-        return {
-          status: 'pending',
-        };
-      }
-
-      if (runStatus.status === 'failed') {
-        // Update status in database
-        await this.prisma.monumentRecognition.update({
-          where: { id: recognitionId },
-          data: {
-            raw_payload_json: {
-              ...rawData,
-              lobstr: {
-                ...lobstrData,
-                status: 'failed',
-              },
-            } as any,
-          },
-        });
-        return {
-          status: 'failed',
-        };
-      }
-
-      if (runStatus.status === 'completed') {
-        // Fetch results
-        const results = await this.lobstrService.getRunResults(lobstrData.runHash);
+    // If we have a place_id, fetch fresh data from Google Places
+    if (googlePlacesData?.place_id) {
+      try {
+        const placeDetails = await this.googlePlacesService.getPlaceDetails(googlePlacesData.place_id);
         
-        if (!results || results.length === 0) {
+        if (placeDetails && placeDetails.reviews) {
+          // Transform to PlaceResult format
+          const placeResult: PlaceResult = {
+            place_id: placeDetails.place_id,
+            name: placeDetails.name,
+            formatted_address: placeDetails.formatted_address,
+            rating: placeDetails.rating,
+            user_ratings_total: placeDetails.user_ratings_total,
+            reviews: placeDetails.reviews?.map(review => ({
+              author_name: review.author_name,
+              author_url: review.author_url,
+              rating: review.rating,
+              text: review.text,
+              time: review.time,
+              relative_time_description: review.relative_time_description,
+            })),
+            geometry: placeDetails.geometry,
+            website: placeDetails.website,
+            international_phone_number: placeDetails.international_phone_number,
+            opening_hours: placeDetails.opening_hours,
+          };
+
+          // Update database with fetched reviews
+          await this.prisma.monumentRecognition.update({
+            where: { id: recognitionId },
+            data: {
+              raw_payload_json: {
+                ...rawData,
+                placeDetails: placeResult,
+              } as any,
+            },
+          });
+
           return {
-            status: 'failed',
+            reviews: placeResult.reviews,
+            rating: placeResult.rating,
+            user_ratings_total: placeResult.user_ratings_total,
+            formatted_address: placeResult.formatted_address,
+            status: 'completed',
           };
         }
-
-        // Get the first result (should be the monument we searched for)
-        const lobstrResult = results[0];
-        
-        // Transform to PlaceResult format
-        const placeDetails: PlaceResult = {
-          name: lobstrResult.name,
-          formatted_address: lobstrResult.formatted_address,
-          rating: lobstrResult.rating,
-          user_ratings_total: lobstrResult.user_ratings_total,
-          reviews: lobstrResult.reviews?.map(review => ({
-            author_name: review.author_name,
-            author_url: review.author_url,
-            rating: review.rating,
-            text: review.text,
-            time: review.time,
-            relative_time_description: review.relative_time_description,
-          })),
-          geometry: lobstrResult.geometry,
-        };
-
-        // Update database with fetched reviews
-        await this.prisma.monumentRecognition.update({
-          where: { id: recognitionId },
-          data: {
-            raw_payload_json: {
-              ...rawData,
-              placeDetails: placeDetails,
-              lobstr: {
-                ...lobstrData,
-                status: 'completed',
-              },
-            } as any,
-          },
-        });
-
+      } catch (error) {
+        this.logger.error('Error fetching Google Places reviews:', (error as Error).message);
         return {
-          reviews: placeDetails.reviews,
-          rating: placeDetails.rating,
-          user_ratings_total: placeDetails.user_ratings_total,
-          formatted_address: placeDetails.formatted_address,
-          status: 'completed',
+          status: 'failed',
         };
       }
-
-      return {
-        status: 'pending',
-      };
-    } catch (error) {
-      this.logger.error('Error fetching monument reviews:', error);
-      return {
-        status: 'failed',
-      };
     }
+
+    // Try to fetch by location and name if available
+    const visionData = rawData?.vision;
+    if (visionData?.location && recognition.name) {
+      try {
+        const placeDetails = await this.googlePlacesService.searchPlaceByLocation(
+          visionData.location,
+          recognition.name
+        );
+
+        if (placeDetails && placeDetails.reviews) {
+          const placeResult: PlaceResult = {
+            place_id: placeDetails.place_id,
+            name: placeDetails.name,
+            formatted_address: placeDetails.formatted_address,
+            rating: placeDetails.rating,
+            user_ratings_total: placeDetails.user_ratings_total,
+            reviews: placeDetails.reviews?.map(review => ({
+              author_name: review.author_name,
+              author_url: review.author_url,
+              rating: review.rating,
+              text: review.text,
+              time: review.time,
+              relative_time_description: review.relative_time_description,
+            })),
+            geometry: placeDetails.geometry,
+            website: placeDetails.website,
+            international_phone_number: placeDetails.international_phone_number,
+            opening_hours: placeDetails.opening_hours,
+          };
+
+          // Update database
+          await this.prisma.monumentRecognition.update({
+            where: { id: recognitionId },
+            data: {
+              raw_payload_json: {
+                ...rawData,
+                placeDetails: placeResult,
+                googlePlaces: {
+                  place_id: placeDetails.place_id,
+                  name: placeDetails.name,
+                  formatted_address: placeDetails.formatted_address,
+                  rating: placeDetails.rating,
+                  user_ratings_total: placeDetails.user_ratings_total,
+                },
+              } as any,
+            },
+          });
+
+          return {
+            reviews: placeResult.reviews,
+            rating: placeResult.rating,
+            user_ratings_total: placeResult.user_ratings_total,
+            formatted_address: placeResult.formatted_address,
+            status: 'completed',
+          };
+        }
+      } catch (error) {
+        this.logger.error('Error fetching Google Places reviews:', (error as Error).message);
+        return {
+          status: 'failed',
+        };
+      }
+    }
+
+    // No place data available
+    return {
+      status: 'not_started',
+    };
   }
 
   /**
