@@ -3,8 +3,36 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 import { GoogleVisionService, LandmarkDetectionResult } from '../common/services/google-vision.service';
 import { WikipediaService, WikipediaResult } from '../common/services/wikipedia.service';
-import { GooglePlacesService, PlaceResult } from '../common/services/google-places.service';
+import { LobstrService, LobstrResult } from '../common/services/lobstr.service';
 import { MonumentRecognition } from '@prisma/client';
+
+export interface PlaceResult {
+  place_id?: string;
+  name: string;
+  formatted_address: string;
+  rating?: number;
+  user_ratings_total?: number;
+  reviews?: Array<{
+    author_name: string;
+    author_url?: string;
+    rating: number;
+    text: string;
+    time: number;
+    relative_time_description?: string;
+  }>;
+  geometry?: {
+    location: {
+      lat: number;
+      lng: number;
+    };
+  };
+  website?: string;
+  international_phone_number?: string;
+  opening_hours?: {
+    open_now: boolean;
+    weekday_text: string[];
+  };
+}
 
 export interface MonumentRecognitionResult {
   id: number;
@@ -40,7 +68,7 @@ export class MonumentsService {
     private cloudinaryService: CloudinaryService,
     private googleVisionService: GoogleVisionService,
     private wikipediaService: WikipediaService,
-    private googlePlacesService: GooglePlacesService,
+    private lobstrService: LobstrService,
   ) {}
 
   /**
@@ -68,7 +96,27 @@ export class MonumentsService {
       const imageUrl = (uploadResult as any).secure_url;
 
       // Detect landmarks using Google Vision
-      const landmarks = await this.googleVisionService.detectLandmarks(imageBuffer);
+      let landmarks: LandmarkDetectionResult[] = [];
+      try {
+        landmarks = await this.googleVisionService.detectLandmarks(imageBuffer);
+      } catch (error: any) {
+        this.logger.error('Google Vision API error:', error);
+        
+        // Check if it's a billing/permission error
+        if (error?.message?.includes('PERMISSION_DENIED') || error?.message?.includes('billing')) {
+          throw new BadRequestException(
+            'Google Vision API requires billing to be enabled. Please enable billing on your Google Cloud project and try again.'
+          );
+        }
+        
+        // Check if it's a no landmarks detected error
+        if (error?.message?.includes('No monuments') || error?.message?.includes('landmarks detected')) {
+          throw error; // Re-throw the original error
+        }
+        
+        // Generic error
+        throw new BadRequestException('Failed to detect landmarks in image. Please ensure Google Vision API is properly configured.');
+      }
       
       if (landmarks.length === 0) {
         throw new BadRequestException('No monuments or landmarks detected in the image');
@@ -89,19 +137,26 @@ export class MonumentsService {
         this.logger.warn('Wikipedia enrichment failed:', (error as Error).message);
       }
 
-      // Enrich with Google Places data if location is available
-      let placeDetails: PlaceResult | null = null;
+      // Submit async job to Lobstr.io for review scraping if location is available
+      let lobstrRunHash: string | null = null;
       if (bestLandmark.location) {
         try {
-          const places = await this.googlePlacesService.searchPlaces(
-            bestLandmark.name,
-            bestLandmark.location
-          );
-          if (places.length > 0) {
-            placeDetails = await this.googlePlacesService.getPlaceDetails(places[0].place_id);
+          // Automatically get or create squid for Google Reviews
+          const squidId = await this.lobstrService.getOrCreateSquid();
+          if (squidId) {
+            lobstrRunHash = await this.lobstrService.scrapePlaceReviews(
+              bestLandmark.name,
+              undefined, // placeId not available from Vision API
+              squidId
+            );
+            if (lobstrRunHash) {
+              this.logger.log(`Submitted Lobstr.io review scraping job: ${lobstrRunHash}`);
+            }
+          } else {
+            this.logger.warn('Failed to get/create Lobstr.io squid, skipping review scraping');
           }
         } catch (error) {
-          this.logger.warn('Google Places enrichment failed:', (error as Error).message);
+          this.logger.warn('Lobstr.io review scraping submission failed:', (error as Error).message);
         }
       }
 
@@ -116,7 +171,10 @@ export class MonumentsService {
           raw_payload_json: {
             landmarks: landmarks as any,
             wikipedia: wikipediaData as any,
-            placeDetails: placeDetails as any,
+            lobstr: {
+              runHash: lobstrRunHash,
+              status: lobstrRunHash ? 'pending' : null,
+            },
             vision: {
               location: bestLandmark.location,
               boundingPoly: bestLandmark.boundingPoly,
@@ -135,7 +193,7 @@ export class MonumentsService {
         wikiSnippet: recognition.wiki_snippet || undefined,
         wikipediaUrl: wikipediaData?.url,
         coordinates: bestLandmark.location,
-        placeDetails: placeDetails || undefined,
+        placeDetails: undefined, // Will be fetched later via getMonumentReviews
         rawData: recognition.raw_payload_json,
         createdAt: recognition.created_at,
       };
@@ -220,6 +278,148 @@ export class MonumentsService {
       rawData: recognition.raw_payload_json,
       createdAt: recognition.created_at,
     };
+  }
+
+  /**
+   * Get monument reviews from Lobstr.io (async polling)
+   */
+  async getMonumentReviews(userId: number, recognitionId: number): Promise<{
+    reviews?: PlaceResult['reviews'];
+    rating?: number;
+    user_ratings_total?: number;
+    formatted_address?: string;
+    status: 'pending' | 'completed' | 'failed' | 'not_started';
+  }> {
+    const recognition = await this.prisma.monumentRecognition.findFirst({
+      where: {
+        id: recognitionId,
+        user_id: userId,
+      },
+    });
+
+    if (!recognition) {
+      throw new NotFoundException('Monument recognition not found');
+    }
+
+    const rawData = recognition.raw_payload_json as any;
+    const lobstrData = rawData?.lobstr;
+
+    // If no Lobstr run hash, reviews were never requested
+    if (!lobstrData?.runHash) {
+      return {
+        status: 'not_started',
+      };
+    }
+
+    // Check if reviews are already fetched and stored
+    if (rawData?.placeDetails && rawData.placeDetails.reviews) {
+      return {
+        reviews: rawData.placeDetails.reviews,
+        rating: rawData.placeDetails.rating,
+        user_ratings_total: rawData.placeDetails.user_ratings_total,
+        formatted_address: rawData.placeDetails.formatted_address,
+        status: 'completed',
+      };
+    }
+
+    // Poll Lobstr.io for run status
+    try {
+      const runStatus = await this.lobstrService.checkRunStatus(lobstrData.runHash);
+      
+      if (!runStatus) {
+        return {
+          status: 'failed',
+        };
+      }
+
+      if (runStatus.status === 'pending' || runStatus.status === 'running') {
+        return {
+          status: 'pending',
+        };
+      }
+
+      if (runStatus.status === 'failed') {
+        // Update status in database
+        await this.prisma.monumentRecognition.update({
+          where: { id: recognitionId },
+          data: {
+            raw_payload_json: {
+              ...rawData,
+              lobstr: {
+                ...lobstrData,
+                status: 'failed',
+              },
+            } as any,
+          },
+        });
+        return {
+          status: 'failed',
+        };
+      }
+
+      if (runStatus.status === 'completed') {
+        // Fetch results
+        const results = await this.lobstrService.getRunResults(lobstrData.runHash);
+        
+        if (!results || results.length === 0) {
+          return {
+            status: 'failed',
+          };
+        }
+
+        // Get the first result (should be the monument we searched for)
+        const lobstrResult = results[0];
+        
+        // Transform to PlaceResult format
+        const placeDetails: PlaceResult = {
+          name: lobstrResult.name,
+          formatted_address: lobstrResult.formatted_address,
+          rating: lobstrResult.rating,
+          user_ratings_total: lobstrResult.user_ratings_total,
+          reviews: lobstrResult.reviews?.map(review => ({
+            author_name: review.author_name,
+            author_url: review.author_url,
+            rating: review.rating,
+            text: review.text,
+            time: review.time,
+            relative_time_description: review.relative_time_description,
+          })),
+          geometry: lobstrResult.geometry,
+        };
+
+        // Update database with fetched reviews
+        await this.prisma.monumentRecognition.update({
+          where: { id: recognitionId },
+          data: {
+            raw_payload_json: {
+              ...rawData,
+              placeDetails: placeDetails,
+              lobstr: {
+                ...lobstrData,
+                status: 'completed',
+              },
+            } as any,
+          },
+        });
+
+        return {
+          reviews: placeDetails.reviews,
+          rating: placeDetails.rating,
+          user_ratings_total: placeDetails.user_ratings_total,
+          formatted_address: placeDetails.formatted_address,
+          status: 'completed',
+        };
+      }
+
+      return {
+        status: 'pending',
+      };
+    } catch (error) {
+      this.logger.error('Error fetching monument reviews:', error);
+      return {
+        status: 'failed',
+      };
+    }
   }
 
   /**

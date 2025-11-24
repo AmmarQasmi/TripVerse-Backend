@@ -97,6 +97,17 @@ export class MonumentsController {
   }
 
   /**
+   * Get monument reviews (async polling)
+   */
+  @Get(':id/reviews')
+  async getReviews(
+    @Param('id', ParseIntPipe) id: number,
+    @CurrentUser() user: any,
+  ) {
+    return await this.monumentsService.getMonumentReviews(user.id, id);
+  }
+
+  /**
    * Delete monument recognition
    */
   @Delete(':id')
