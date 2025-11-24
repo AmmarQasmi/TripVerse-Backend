@@ -16,17 +16,18 @@ const prisma_service_1 = require("../prisma/prisma.service");
 const cloudinary_service_1 = require("../common/cloudinary/cloudinary.service");
 const google_vision_service_1 = require("../common/services/google-vision.service");
 const wikipedia_service_1 = require("../common/services/wikipedia.service");
-const google_places_service_1 = require("../common/services/google-places.service");
+const lobstr_service_1 = require("../common/services/lobstr.service");
 let MonumentsService = MonumentsService_1 = class MonumentsService {
-    constructor(prisma, cloudinaryService, googleVisionService, wikipediaService, googlePlacesService) {
+    constructor(prisma, cloudinaryService, googleVisionService, wikipediaService, lobstrService) {
         this.prisma = prisma;
         this.cloudinaryService = cloudinaryService;
         this.googleVisionService = googleVisionService;
         this.wikipediaService = wikipediaService;
-        this.googlePlacesService = googlePlacesService;
+        this.lobstrService = lobstrService;
         this.logger = new common_1.Logger(MonumentsService_1.name);
     }
     async recognizeMonument(userId, imageBuffer, originalName) {
+        var _a, _b, _c, _d;
         try {
             this.logger.log(`Starting monument recognition for user ${userId}`);
             const uploadResult = await this.cloudinaryService.uploadImage({ buffer: imageBuffer, originalname: originalName }, 'monuments', {
@@ -35,7 +36,20 @@ let MonumentsService = MonumentsService_1 = class MonumentsService {
                 ]
             });
             const imageUrl = uploadResult.secure_url;
-            const landmarks = await this.googleVisionService.detectLandmarks(imageBuffer);
+            let landmarks = [];
+            try {
+                landmarks = await this.googleVisionService.detectLandmarks(imageBuffer);
+            }
+            catch (error) {
+                this.logger.error('Google Vision API error:', error);
+                if (((_a = error === null || error === void 0 ? void 0 : error.message) === null || _a === void 0 ? void 0 : _a.includes('PERMISSION_DENIED')) || ((_b = error === null || error === void 0 ? void 0 : error.message) === null || _b === void 0 ? void 0 : _b.includes('billing'))) {
+                    throw new common_1.BadRequestException('Google Vision API requires billing to be enabled. Please enable billing on your Google Cloud project and try again.');
+                }
+                if (((_c = error === null || error === void 0 ? void 0 : error.message) === null || _c === void 0 ? void 0 : _c.includes('No monuments')) || ((_d = error === null || error === void 0 ? void 0 : error.message) === null || _d === void 0 ? void 0 : _d.includes('landmarks detected'))) {
+                    throw error;
+                }
+                throw new common_1.BadRequestException('Failed to detect landmarks in image. Please ensure Google Vision API is properly configured.');
+            }
             if (landmarks.length === 0) {
                 throw new common_1.BadRequestException('No monuments or landmarks detected in the image');
             }
@@ -48,16 +62,22 @@ let MonumentsService = MonumentsService_1 = class MonumentsService {
             catch (error) {
                 this.logger.warn('Wikipedia enrichment failed:', error.message);
             }
-            let placeDetails = null;
+            let lobstrRunHash = null;
             if (bestLandmark.location) {
                 try {
-                    const places = await this.googlePlacesService.searchPlaces(bestLandmark.name, bestLandmark.location);
-                    if (places.length > 0) {
-                        placeDetails = await this.googlePlacesService.getPlaceDetails(places[0].place_id);
+                    const squidId = await this.lobstrService.getOrCreateSquid();
+                    if (squidId) {
+                        lobstrRunHash = await this.lobstrService.scrapePlaceReviews(bestLandmark.name, undefined, squidId);
+                        if (lobstrRunHash) {
+                            this.logger.log(`Submitted Lobstr.io review scraping job: ${lobstrRunHash}`);
+                        }
+                    }
+                    else {
+                        this.logger.warn('Failed to get/create Lobstr.io squid, skipping review scraping');
                     }
                 }
                 catch (error) {
-                    this.logger.warn('Google Places enrichment failed:', error.message);
+                    this.logger.warn('Lobstr.io review scraping submission failed:', error.message);
                 }
             }
             const recognition = await this.prisma.monumentRecognition.create({
@@ -70,7 +90,10 @@ let MonumentsService = MonumentsService_1 = class MonumentsService {
                     raw_payload_json: {
                         landmarks: landmarks,
                         wikipedia: wikipediaData,
-                        placeDetails: placeDetails,
+                        lobstr: {
+                            runHash: lobstrRunHash,
+                            status: lobstrRunHash ? 'pending' : null,
+                        },
                         vision: {
                             location: bestLandmark.location,
                             boundingPoly: bestLandmark.boundingPoly,
@@ -87,7 +110,7 @@ let MonumentsService = MonumentsService_1 = class MonumentsService {
                 wikiSnippet: recognition.wiki_snippet || undefined,
                 wikipediaUrl: wikipediaData === null || wikipediaData === void 0 ? void 0 : wikipediaData.url,
                 coordinates: bestLandmark.location,
-                placeDetails: placeDetails || undefined,
+                placeDetails: undefined,
                 rawData: recognition.raw_payload_json,
                 createdAt: recognition.created_at,
             };
@@ -158,6 +181,117 @@ let MonumentsService = MonumentsService_1 = class MonumentsService {
             rawData: recognition.raw_payload_json,
             createdAt: recognition.created_at,
         };
+    }
+    async getMonumentReviews(userId, recognitionId) {
+        var _a;
+        const recognition = await this.prisma.monumentRecognition.findFirst({
+            where: {
+                id: recognitionId,
+                user_id: userId,
+            },
+        });
+        if (!recognition) {
+            throw new common_1.NotFoundException('Monument recognition not found');
+        }
+        const rawData = recognition.raw_payload_json;
+        const lobstrData = rawData === null || rawData === void 0 ? void 0 : rawData.lobstr;
+        if (!(lobstrData === null || lobstrData === void 0 ? void 0 : lobstrData.runHash)) {
+            return {
+                status: 'not_started',
+            };
+        }
+        if ((rawData === null || rawData === void 0 ? void 0 : rawData.placeDetails) && rawData.placeDetails.reviews) {
+            return {
+                reviews: rawData.placeDetails.reviews,
+                rating: rawData.placeDetails.rating,
+                user_ratings_total: rawData.placeDetails.user_ratings_total,
+                formatted_address: rawData.placeDetails.formatted_address,
+                status: 'completed',
+            };
+        }
+        try {
+            const runStatus = await this.lobstrService.checkRunStatus(lobstrData.runHash);
+            if (!runStatus) {
+                return {
+                    status: 'failed',
+                };
+            }
+            if (runStatus.status === 'pending' || runStatus.status === 'running') {
+                return {
+                    status: 'pending',
+                };
+            }
+            if (runStatus.status === 'failed') {
+                await this.prisma.monumentRecognition.update({
+                    where: { id: recognitionId },
+                    data: {
+                        raw_payload_json: {
+                            ...rawData,
+                            lobstr: {
+                                ...lobstrData,
+                                status: 'failed',
+                            },
+                        },
+                    },
+                });
+                return {
+                    status: 'failed',
+                };
+            }
+            if (runStatus.status === 'completed') {
+                const results = await this.lobstrService.getRunResults(lobstrData.runHash);
+                if (!results || results.length === 0) {
+                    return {
+                        status: 'failed',
+                    };
+                }
+                const lobstrResult = results[0];
+                const placeDetails = {
+                    name: lobstrResult.name,
+                    formatted_address: lobstrResult.formatted_address,
+                    rating: lobstrResult.rating,
+                    user_ratings_total: lobstrResult.user_ratings_total,
+                    reviews: (_a = lobstrResult.reviews) === null || _a === void 0 ? void 0 : _a.map(review => ({
+                        author_name: review.author_name,
+                        author_url: review.author_url,
+                        rating: review.rating,
+                        text: review.text,
+                        time: review.time,
+                        relative_time_description: review.relative_time_description,
+                    })),
+                    geometry: lobstrResult.geometry,
+                };
+                await this.prisma.monumentRecognition.update({
+                    where: { id: recognitionId },
+                    data: {
+                        raw_payload_json: {
+                            ...rawData,
+                            placeDetails: placeDetails,
+                            lobstr: {
+                                ...lobstrData,
+                                status: 'completed',
+                            },
+                        },
+                    },
+                });
+                return {
+                    reviews: placeDetails.reviews,
+                    rating: placeDetails.rating,
+                    user_ratings_total: placeDetails.user_ratings_total,
+                    formatted_address: placeDetails.formatted_address,
+                    status: 'completed',
+                };
+            }
+            return {
+                status: 'pending',
+            };
+        }
+        catch (error) {
+            this.logger.error('Error fetching monument reviews:', error);
+            return {
+                status: 'failed',
+            };
+        }
     }
     async deleteRecognition(userId, recognitionId) {
         const recognition = await this.prisma.monumentRecognition.findFirst({
@@ -275,6 +409,6 @@ exports.MonumentsService = MonumentsService = MonumentsService_1 = __decorate([
         cloudinary_service_1.CloudinaryService,
         google_vision_service_1.GoogleVisionService,
         wikipedia_service_1.WikipediaService,
-        google_places_service_1.GooglePlacesService])
+        lobstr_service_1.LobstrService])
 ], MonumentsService);
 //# sourceMappingURL=monuments.service.js.map

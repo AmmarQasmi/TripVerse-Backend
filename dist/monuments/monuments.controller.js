@@ -43,6 +43,9 @@ let MonumentsController = class MonumentsController {
     async getRecognition(id, user) {
         return await this.monumentsService.getRecognition(user.id, id);
     }
+    async getReviews(id, user) {
+        return await this.monumentsService.getMonumentReviews(user.id, id);
+    }
     async deleteRecognition(id, user) {
         await this.monumentsService.deleteRecognition(user.id, id);
         return (0, response_util_1.successResponse)(null, 'Monument recognition deleted successfully');
@@ -122,6 +125,14 @@ __decorate([
     __metadata("design:paramtypes", [Number, Object]),
     __metadata("design:returntype", Promise)
 ], MonumentsController.prototype, "getRecognition", null);
+__decorate([
+    (0, common_1.Get)(':id/reviews'),
+    __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),
+    __param(1, (0, current_user_decorator_1.CurrentUser)()),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", [Number, Object]),
+    __metadata("design:returntype", Promise)
+], MonumentsController.prototype, "getReviews", null);
 __decorate([
     (0, common_1.Delete)(':id'),
     __param(0, (0, common_1.Param)('id', common_1.ParseIntPipe)),

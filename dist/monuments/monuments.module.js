@@ -14,7 +14,7 @@ const prisma_module_1 = require("../prisma/prisma.module");
 const cloudinary_module_1 = require("../common/cloudinary/cloudinary.module");
 const google_vision_service_1 = require("../common/services/google-vision.service");
 const wikipedia_service_1 = require("../common/services/wikipedia.service");
-const google_places_service_1 = require("../common/services/google-places.service");
+const lobstr_service_1 = require("../common/services/lobstr.service");
 const export_service_1 = require("../common/services/export.service");
 let MonumentsModule = class MonumentsModule {
 };
@@ -27,7 +27,7 @@ exports.MonumentsModule = MonumentsModule = __decorate([
             monuments_service_1.MonumentsService,
             google_vision_service_1.GoogleVisionService,
             wikipedia_service_1.WikipediaService,
-            google_places_service_1.GooglePlacesService,
+            lobstr_service_1.LobstrService,
             export_service_1.ExportService,
         ],
         exports: [monuments_service_1.MonumentsService],
