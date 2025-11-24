@@ -11,12 +11,10 @@ This guide will help you obtain and configure API keys for Google Vision, Google
 Create a `.env` file in your project root directory and add these environment variables:
 
 ```env
-# Google Vision API Configuration
-GOOGLE_VISION_CLIENT_EMAIL=your-service-account-email@project.iam.gserviceaccount.com
-GOOGLE_VISION_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYour-Private-Key-Here\n-----END PRIVATE KEY-----\n"
-GOOGLE_VISION_PROJECT_ID=your-project-id
+# Google Vision API Configuration (API Key)
+GOOGLE_VISION_API_KEY=your-google-vision-api-key
 
-# Google Places API Configuration
+# Google Places API Configuration (Optional - Not currently used)
 GOOGLE_PLACES_API_KEY=your-google-places-api-key
 
 # Wikipedia API (No key required - Free to use)
@@ -64,42 +62,27 @@ GOOGLE_PLACES_API_KEY=your-google-places-api-key
 3. Click on it and press **"Enable"**
 4. Wait for activation (may take a few seconds)
 
-### Step 4: Create Service Account
+### Step 4: Create API Key
 1. Go to **"APIs & Services" > "Credentials"**
 2. Click **"+ CREATE CREDENTIALS"** dropdown
-3. Select **"Service account"**
-4. Fill in:
-   - Service account name: `monument-recognition`
-   - Service account ID: auto-generated
-   - Click **"Create and Continue"**
-5. Skip grant access (click **"Continue"**)
-6. Click **"Done"**
+3. Select **"API key"**
+4. Copy the generated API key immediately
 
-### Step 5: Create and Download Key
-1. Find your service account in the list
-2. Click on the service account email
-3. Go to **"Keys"** tab
-4. Click **"Add Key" > "Create new key"**
-5. Select **"JSON"** format
-6. Click **"Create"** (downloads automatically)
+### Step 5: Restrict API Key (Recommended for Security)
+1. Click on the API key you just created to edit it
+2. Under **"API restrictions"**, select **"Restrict key"**
+3. Choose **"Cloud Vision API"** from the list
+4. Under **"Application restrictions"**, choose based on your deployment:
+   - **Backend/Server**: Select "IP addresses" and add your server IPs
+   - **Frontend**: Select "HTTP referrers" and add your domain
+   - **Development**: You can leave it unrestricted for testing
+5. Click **"Save"**
 
-### Step 6: Extract Credentials from JSON
-Open the downloaded JSON file. You'll see:
-```json
-{
-  "type": "service_account",
-  "project_id": "your-project-id",
-  "private_key_id": "...",
-  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
-  "client_email": "your-service-account@project.iam.gserviceaccount.com",
-  ...
-}
+### Step 6: Add to .env
+Copy the API key to your `.env` file:
+```env
+GOOGLE_VISION_API_KEY=AIzaSyBxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
-
-Copy these values to your `.env`:
-- `GOOGLE_VISION_PROJECT_ID` = `project_id`
-- `GOOGLE_VISION_CLIENT_EMAIL` = `client_email`
-- `GOOGLE_VISION_PRIVATE_KEY` = `private_key` (keep the quotes and \n characters)
 
 ---
 
@@ -169,7 +152,7 @@ Always use `.env` file and never hardcode keys in your code.
 
 ### 3. Restrict API Keys
 - For Google Places: Restrict to specific APIs
-- For Google Vision: Use service account (better security)
+- For Google Vision: Restrict to Vision API only and set application restrictions
 - Set up billing alerts in Google Cloud Console
 
 ### 4. Rotate Keys Regularly
@@ -201,10 +184,19 @@ Change your API keys every 90 days for security.
 
 ### Test Google Vision:
 ```bash
-curl -X POST https://vision.googleapis.com/v1/images:annotate \
-  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+curl -X POST "https://vision.googleapis.com/v1/images:annotate?key=YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d @request.json
+  -d '{
+    "requests": [{
+      "image": {
+        "content": "BASE64_ENCODED_IMAGE"
+      },
+      "features": [{
+        "type": "LANDMARK_DETECTION",
+        "maxResults": 10
+      }]
+    }]
+  }'
 ```
 
 ### Test Google Places:
@@ -224,12 +216,9 @@ curl "https://en.wikipedia.org/api/rest_v1/page/summary/Eiffel_Tower"
 - [ ] Create Google Cloud account
 - [ ] Create new project
 - [ ] Enable Vision API
-- [ ] Create service account
-- [ ] Download JSON key file
-- [ ] Extract credentials from JSON
-- [ ] Enable Places API
-- [ ] Create Places API key
-- [ ] Add all credentials to `.env` file
+- [ ] Create API key
+- [ ] Restrict API key to Vision API
+- [ ] Add API key to `.env` file
 - [ ] Test monument recognition endpoint
 - [ ] Verify exports work correctly
 
@@ -280,14 +269,18 @@ curl "https://en.wikipedia.org/api/rest_v1/page/summary/Eiffel_Tower"
 ### Error: "API not enabled"
 - Solution: Go to APIs & Services > Library and enable the required API
 
-### Error: "Invalid credentials"
-- Solution: Check that quotes and \n characters are preserved in private key
+### Error: "Invalid API key" or "API key not valid"
+- Solution: Verify the API key is correctly copied to `.env` file
+- Solution: Check that API key restrictions allow Vision API access
+- Solution: Ensure the API key is not expired or deleted
 
 ### Error: "Quota exceeded"
 - Solution: Increase quota in Google Cloud Console or upgrade billing
 
-### Error: "Permission denied"
-- Solution: Make sure service account has necessary permissions
+### Error: "Permission denied" or "403 Forbidden"
+- Solution: Check that Vision API is enabled in your Google Cloud project
+- Solution: Verify API key restrictions allow Vision API access
+- Solution: Check application restrictions (IP addresses or HTTP referrers) if configured
 
 ### Error: "Billing not enabled"
 - Go to https://console.cloud.google.com/billing

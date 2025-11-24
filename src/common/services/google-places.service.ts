@@ -1,0 +1,231 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import axios, { AxiosError } from 'axios';
+
+export interface GooglePlacesReview {
+  author_name: string;
+  author_url?: string;
+  profile_photo_url?: string;
+  rating: number;
+  text: string;
+  time: number;
+  relative_time_description?: string;
+}
+
+export interface GooglePlacesResult {
+  place_id: string;
+  name: string;
+  formatted_address: string;
+  rating?: number;
+  user_ratings_total?: number;
+  reviews?: GooglePlacesReview[];
+  geometry?: {
+    location: {
+      lat: number;
+      lng: number;
+    };
+  };
+  website?: string;
+  international_phone_number?: string;
+  opening_hours?: {
+    open_now: boolean;
+    weekday_text: string[];
+  };
+  photos?: Array<{
+    photo_reference: string;
+    height: number;
+    width: number;
+  }>;
+}
+
+@Injectable()
+export class GooglePlacesService {
+  private readonly logger = new Logger(GooglePlacesService.name);
+  private readonly apiKey: string;
+  private readonly baseUrl = 'https://maps.googleapis.com/maps/api/place';
+
+  constructor(private configService: ConfigService) {
+    this.apiKey = this.configService.get('GOOGLE_PLACES_API_KEY') || '';
+    
+    if (!this.apiKey || this.apiKey.trim() === '') {
+      this.logger.warn('Google Places API key not configured');
+    } else {
+      this.logger.log('Google Places API initialized with API key');
+    }
+  }
+
+  /**
+   * Search for a place by name only
+   */
+  async searchPlace(placeName: string): Promise<GooglePlacesResult | null> {
+    try {
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.logger.warn('Google Places API key not configured');
+        return null;
+      }
+
+      this.logger.log(`Searching Google Places for: ${placeName}`);
+
+      // Use Text Search API with just the place name
+      const response = await axios.get(`${this.baseUrl}/textsearch/json`, {
+        params: {
+          query: placeName,
+          key: this.apiKey,
+        },
+        timeout: 10000,
+      });
+
+      if (response.data?.results && response.data.results.length > 0) {
+        const place = response.data.results[0];
+        this.logger.log(`Found place: ${place.name} (${place.formatted_address || 'no address'})`);
+        const placeId = place.place_id;
+
+        // Get detailed place information including reviews
+        return await this.getPlaceDetails(placeId);
+      }
+
+      this.logger.warn(`No place found for: ${placeName}`);
+      return null;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+        this.logger.error('Error searching Google Places:', {
+          message: axiosError.message,
+          status: axiosError.response?.status,
+          statusText: axiosError.response?.statusText,
+          responseData: axiosError.response?.data,
+        });
+      } else {
+        this.logger.error('Error searching Google Places:', (error as Error).message);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Get detailed place information including reviews
+   */
+  async getPlaceDetails(placeId: string): Promise<GooglePlacesResult | null> {
+    try {
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.logger.warn('Google Places API key not configured');
+        return null;
+      }
+
+      this.logger.log(`Fetching place details for: ${placeId}`);
+
+      // Use Place Details API
+      const response = await axios.get(`${this.baseUrl}/details/json`, {
+        params: {
+          place_id: placeId,
+          fields: 'place_id,name,formatted_address,rating,user_ratings_total,reviews,geometry,website,international_phone_number,opening_hours,photos',
+          key: this.apiKey,
+        },
+        timeout: 10000,
+      });
+
+      if (response.data?.result) {
+        const result = response.data.result;
+        
+        return {
+          place_id: result.place_id,
+          name: result.name,
+          formatted_address: result.formatted_address,
+          rating: result.rating,
+          user_ratings_total: result.user_ratings_total,
+          reviews: result.reviews?.map((review: any) => ({
+            author_name: review.author_name,
+            author_url: review.author_url,
+            profile_photo_url: review.profile_photo_url,
+            rating: review.rating,
+            text: review.text,
+            time: review.time,
+            relative_time_description: review.relative_time_description,
+          })),
+          geometry: result.geometry ? {
+            location: {
+              lat: result.geometry.location.lat,
+              lng: result.geometry.location.lng,
+            },
+          } : undefined,
+          website: result.website,
+          international_phone_number: result.international_phone_number,
+          opening_hours: result.opening_hours ? {
+            open_now: result.opening_hours.open_now,
+            weekday_text: result.opening_hours.weekday_text || [],
+          } : undefined,
+          photos: result.photos?.map((photo: any) => ({
+            photo_reference: photo.photo_reference,
+            height: photo.height,
+            width: photo.width,
+          })),
+        };
+      }
+
+      return null;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+        this.logger.error('Error fetching place details:', {
+          message: axiosError.message,
+          status: axiosError.response?.status,
+          statusText: axiosError.response?.statusText,
+          responseData: axiosError.response?.data,
+        });
+      } else {
+        this.logger.error('Error fetching place details:', (error as Error).message);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Search for a place by coordinates (reverse geocoding + nearby search)
+   */
+  async searchPlaceByLocation(location: { lat: number; lng: number }, placeName?: string): Promise<GooglePlacesResult | null> {
+    try {
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.logger.warn('Google Places API key not configured');
+        return null;
+      }
+
+      // If place name is provided, use text search by name only
+      if (placeName) {
+        return await this.searchPlace(placeName);
+      }
+
+      // Otherwise, use Nearby Search API
+      this.logger.log(`Searching places near ${location.lat},${location.lng}`);
+
+      const response = await axios.get(`${this.baseUrl}/nearbysearch/json`, {
+        params: {
+          location: `${location.lat},${location.lng}`,
+          radius: 1000, // 1km radius
+          type: 'tourist_attraction|point_of_interest',
+          key: this.apiKey,
+        },
+        timeout: 10000,
+      });
+
+      if (response.data?.results && response.data.results.length > 0) {
+        const place = response.data.results[0];
+        return await this.getPlaceDetails(place.place_id);
+      }
+
+      return null;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+        this.logger.error('Error searching place by location:', {
+          message: axiosError.message,
+          status: axiosError.response?.status,
+          statusText: axiosError.response?.statusText,
+        });
+      } else {
+        this.logger.error('Error searching place by location:', (error as Error).message);
+      }
+      return null;
+    }
+  }
+}
+

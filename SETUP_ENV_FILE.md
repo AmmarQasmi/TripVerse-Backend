@@ -66,11 +66,9 @@ CLOUDINARY_API_KEY=
 CLOUDINARY_API_SECRET=
 
 # ============================================
-# Google Vision API Configuration
+# Google Vision API Configuration (API Key)
 # ============================================
-GOOGLE_VISION_CLIENT_EMAIL=monument-recognition@tripverse-monument-recognition.iam.gserviceaccount.com
-GOOGLE_VISION_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDD6XC45aXDpy6T\nm82vIL3n1KKy0BD8qonIbeQvcNDaExoCX3wlMy2fVO5VZX8vVbsLTqRPw/kaWmkK\nWhDyvip68Z9VTDy7U6LyIMVUzifGJ0cmu6YSmlvOhmpgXXYp8P/XSI+zMZWOFzJX\n4Brw3DlXQ6M+BGC8xfd4+TCZcT7O1PiuEyuuP2hOaOYjjjpelJXFDo88kzZJn1+k\nvZj2HGXppnCEhe/INmMRD4ejUXP4CkVznnmu5uwmwiJyQJRwnBnSDS+3XnkVx0f0\nVbY8MFWX9cEXGBaiSu6/n5tyUpsmjgX/BWBK3hnOz+KphMuxqteGpprOlnAR4enh\nJnm9O+ezAgMBAAECggEALuXsko6C+o3EZBiJifFcFKm90vFlB58pgZ3w4HxwuquU\n79l8xgj01G4H6dB0vFeZAZFvWxruQGVBPPWnlfx4/dpmioxIA433dV/r7Su2sMRJ\nT5ffHxftf0iFIZFuDoc/L4GSyNJHW27pIcknmd4WKfIqm1d/8uCvJ7n7bNgDsY41\nyhHzG6E9yjjGlHMI+cK0ohDsKvEtNtFsOV7jsAWzTOGBq1l1PVMt5Rv+F3qb+EZj\n3YQ7kvbcQcNH0i2G0jgIguijYK4ZU2b7H6FlaKEJ8Ubcl+yHDMzaXlTqP7NhjTWz\nC439fB/lYkOZB0EtSBj1O/u64W0DoveAtIecCllZhQKBgQDhyz/lIak8Gi3PCrh1\nptJjCMHHXhq6DRrmFn3xIuyLoc8cuzPHcfxo6ZoiKlwfsV9tDfh6p5PaVFCjxagH\nyJmB9VlT9hcPA1oIKsZYfUP1Fu82PAfl5l98242isih+o6i5bh2qQg6hkDZ7GuaE\nCLaoIsL9RVOsPW5lx1NaE5FQnQKBgQDeHtJPV9WAvx4jQhepFDhEO1k4GrGP3/QD\ngCX4d+hZ+S09NIBmgsAnZftLx+AiJFARVtJ8IhH7oMN3IMF9kyJPn+qwd5azrlhr\nUjQ5Hs6SURZfZ7xsiHSPRJOXA5QyWd5zHMedEQUptHQ6Yk3j584/zoaZQA+2zO9G\nUlPkv5lgjwKBgF6n6CdUTzAFAYM0SVP5FWWy/BlqF+Y7LDWc5Ds8mtGGid7Pk8te\nu6P3mkgMXgZjQ0/idXJl4hO7GPsvF1v7+m6Cvmn2VoBStWGLHQ9npB+Q98NSszTr\nuMgM+nlkGpnMXiUuRn1jp+KPJGfDRTPAu2INAJVQhN1F+4vrXcP7RAX5AoGAVdiR\nrcqjoKO80SGtJVLEQFKzs8RVVebXVzcC9dnZ+lQckOgmq/firhdzHSG91VQ1gc4N\ngZ5lVtwWT4dgYNkpzJ5gxR0jKIS8dZYKyvzGF7SxMeRU5ZmDew+k/xuJ/j/Pgqvf\n1iuK1EiDF0GBGxEvHGgEi1w/9oWUAJi3BdSrQa8CgYEArYk+jl213COXG9oePmcw\np1I8bPJBptVGzjK2Bdr0Fajia1hZ4Sv5xy24FWUzEIhc/VEIp5e67Jj+BhdPXIi5\na7ZYZeWEaV5rQ6nDAu0lpq9DMC4XLs/J54Q1MIYCuzIPv5dFMJAA+q1C3v/j/W2W\nm3l9BS63vyH9Y2Io+GsiK9Q=\n-----END PRIVATE KEY-----\n"
-GOOGLE_VISION_PROJECT_ID=tripverse-monument-recognition
+GOOGLE_VISION_API_KEY=your-google-vision-api-key-here
 
 # ============================================
 # Google Places API Configuration (Optional - Leave empty for now)
@@ -82,11 +80,11 @@ GOOGLE_PLACES_API_KEY=
 
 ## ⚠️ Important Notes
 
-### 1. Keep Quotes on Private Key
+### 1. Google Vision API Key
 ```env
-GOOGLE_VISION_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n..."
+GOOGLE_VISION_API_KEY=AIzaSyBxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
-**The quotes and \n are important!**
+**Make sure to copy the full API key without any spaces or extra characters.**
 
 ### 2. Cloudinary Setup
 Go to: https://cloudinary.com

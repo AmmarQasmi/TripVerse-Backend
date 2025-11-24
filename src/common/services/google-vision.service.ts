@@ -1,6 +1,6 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { ImageAnnotatorClient } from '@google-cloud/vision';
+import axios, { AxiosError } from 'axios';
 
 export interface LandmarkDetectionResult {
   name: string;
@@ -15,116 +15,285 @@ export interface LandmarkDetectionResult {
 @Injectable()
 export class GoogleVisionService {
   private readonly logger = new Logger(GoogleVisionService.name);
-  private client: ImageAnnotatorClient;
+  private readonly apiKey: string;
+  private readonly baseUrl = 'https://vision.googleapis.com/v1/images:annotate';
 
   constructor(private configService: ConfigService) {
-    // Initialize Google Vision client
-    this.client = new ImageAnnotatorClient({
-      credentials: {
-        client_email: this.configService.get('GOOGLE_VISION_CLIENT_EMAIL'),
-        private_key: this.configService.get('GOOGLE_VISION_PRIVATE_KEY')?.replace(/\\n/g, '\n'),
-      },
-      projectId: this.configService.get('GOOGLE_VISION_PROJECT_ID'),
-    });
+    // Initialize with API key
+    this.apiKey = this.configService.get('GOOGLE_VISION_API_KEY') || '';
+    
+    if (!this.apiKey || this.apiKey.trim() === '') {
+      this.logger.warn('Google Vision API key not configured');
+    } else {
+      this.logger.log('Google Vision API initialized with API key');
+    }
   }
 
   /**
-   * Detect landmarks in an image using Google Vision API
+   * Detect landmarks in an image using Google Vision API (REST API with API key)
    */
   async detectLandmarks(imageBuffer: Buffer): Promise<LandmarkDetectionResult[]> {
     try {
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        throw new BadRequestException('Google Vision API key is not configured');
+      }
+
       this.logger.log('Starting landmark detection...');
 
-      const [result] = await this.client.landmarkDetection({
-        image: {
-          content: imageBuffer,
-        },
-        imageContext: {
-          languageHints: ['en'], // English language hints
-        },
-      });
+      // Convert image buffer to base64
+      const base64Image = imageBuffer.toString('base64');
+
+      // Prepare REST API request
+      const requestBody = {
+        requests: [
+          {
+            image: {
+              content: base64Image,
+            },
+            features: [
+              {
+                type: 'LANDMARK_DETECTION',
+                maxResults: 10,
+              },
+            ],
+            imageContext: {
+              languageHints: ['en'],
+            },
+          },
+        ],
+      };
+
+      // Make REST API call
+      const response = await axios.post(
+        `${this.baseUrl}?key=${this.apiKey}`,
+        requestBody,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000, // 30 seconds timeout
+        }
+      );
 
       const landmarks: LandmarkDetectionResult[] = [];
 
-      if (result.landmarkAnnotations && result.landmarkAnnotations.length > 0) {
-        for (const annotation of result.landmarkAnnotations) {
-          if (annotation.description && annotation.score) {
-            const landmark: LandmarkDetectionResult = {
-              name: annotation.description,
-              confidence: annotation.score,
-            };
+      // Parse response
+      if (response.data?.responses && response.data.responses.length > 0) {
+        const result = response.data.responses[0];
 
-            // Add location if available
-            if (annotation.locations && annotation.locations.length > 0) {
-              const location = annotation.locations[0].latLng;
-              if (location) {
-                landmark.location = {
-                  lat: location.latitude || 0,
-                  lng: location.longitude || 0,
-                };
+        if (result.landmarkAnnotations && result.landmarkAnnotations.length > 0) {
+          for (const annotation of result.landmarkAnnotations) {
+            if (annotation.description && annotation.score !== undefined) {
+              const landmark: LandmarkDetectionResult = {
+                name: annotation.description,
+                confidence: annotation.score,
+              };
+
+              // Add location if available
+              if (annotation.locations && annotation.locations.length > 0) {
+                const location = annotation.locations[0].latLng;
+                if (location) {
+                  landmark.location = {
+                    lat: location.latitude || 0,
+                    lng: location.longitude || 0,
+                  };
+                }
               }
-            }
 
-            // Add bounding poly if available
-            if (annotation.boundingPoly) {
-              landmark.boundingPoly = annotation.boundingPoly;
-            }
+              // Add bounding poly if available
+              if (annotation.boundingPoly) {
+                landmark.boundingPoly = annotation.boundingPoly;
+              }
 
-            landmarks.push(landmark);
+              landmarks.push(landmark);
+            }
           }
+        }
+
+        // Check for errors in response
+        if (result.error) {
+          this.logger.error('Google Vision API returned error:', result.error);
+          throw new BadRequestException(
+            result.error.message || 'Failed to detect landmarks in image'
+          );
         }
       }
 
       this.logger.log(`Detected ${landmarks.length} landmarks`);
       return landmarks;
-
     } catch (error) {
-      this.logger.error('Google Vision API error:', error);
+      // Handle axios errors
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+        
+        if (axiosError.response) {
+          // API returned error response
+          const status = axiosError.response.status;
+          const errorData = axiosError.response.data as any;
+
+          this.logger.error(
+            `Google Vision API error (${status}):`,
+            errorData?.error?.message || axiosError.message
+          );
+
+          if (status === 400) {
+            throw new BadRequestException(
+              errorData?.error?.message || 'Invalid image or request format'
+            );
+          } else if (status === 403) {
+            throw new BadRequestException(
+              'Google Vision API key is invalid or restricted. Please check your API key configuration.'
+            );
+          } else if (status === 429) {
+            throw new BadRequestException(
+              'Google Vision API rate limit exceeded. Please try again later.'
+            );
+          } else {
+            throw new BadRequestException(
+              errorData?.error?.message || 'Failed to detect landmarks in image'
+            );
+          }
+        } else if (axiosError.request) {
+          // Request made but no response received
+          this.logger.error('Google Vision API request timeout or network error');
+          throw new BadRequestException(
+            'Failed to connect to Google Vision API. Please check your internet connection.'
+          );
+        }
+      }
+
+      // Handle other errors
+      this.logger.error('Google Vision API error:', (error as Error).message);
       throw new BadRequestException('Failed to detect landmarks in image');
     }
   }
 
   /**
    * Detect text in an image (useful for monument signs/plaques)
+   * Note: This method is kept for potential future use but may need REST API conversion
    */
   async detectText(imageBuffer: Buffer): Promise<string[]> {
     try {
-      const [result] = await this.client.textDetection({
-        image: {
-          content: imageBuffer,
-        },
-      });
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.logger.warn('Google Vision API key not configured, skipping text detection');
+        return [];
+      }
+
+      // Convert image buffer to base64
+      const base64Image = imageBuffer.toString('base64');
+
+      // Prepare REST API request
+      const requestBody = {
+        requests: [
+          {
+            image: {
+              content: base64Image,
+            },
+            features: [
+              {
+                type: 'TEXT_DETECTION',
+                maxResults: 10,
+              },
+            ],
+          },
+        ],
+      };
+
+      // Make REST API call
+      const response = await axios.post(
+        `${this.baseUrl}?key=${this.apiKey}`,
+        requestBody,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
+        }
+      );
 
       const texts: string[] = [];
-      if (result.textAnnotations && result.textAnnotations.length > 0) {
-        for (const annotation of result.textAnnotations) {
-          if (annotation.description) {
-            texts.push(annotation.description);
+
+      if (response.data?.responses && response.data.responses.length > 0) {
+        const result = response.data.responses[0];
+
+        if (result.textAnnotations && result.textAnnotations.length > 0) {
+          for (const annotation of result.textAnnotations) {
+            if (annotation.description) {
+              texts.push(annotation.description);
+            }
           }
+        }
+
+        if (result.error) {
+          this.logger.error('Text detection error:', result.error);
+          return [];
         }
       }
 
       return texts;
     } catch (error) {
-      this.logger.error('Text detection error:', error);
+      this.logger.error('Text detection error:', (error as Error).message);
       return [];
     }
   }
 
   /**
    * Get image properties (colors, etc.)
+   * Note: This method is kept for potential future use but may need REST API conversion
    */
   async getImageProperties(imageBuffer: Buffer): Promise<any> {
     try {
-      const [result] = await this.client.imageProperties({
-        image: {
-          content: imageBuffer,
-        },
-      });
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.logger.warn('Google Vision API key not configured, skipping image properties');
+        return null;
+      }
 
-      return result.imagePropertiesAnnotation;
+      // Convert image buffer to base64
+      const base64Image = imageBuffer.toString('base64');
+
+      // Prepare REST API request
+      const requestBody = {
+        requests: [
+          {
+            image: {
+              content: base64Image,
+            },
+            features: [
+              {
+                type: 'IMAGE_PROPERTIES',
+                maxResults: 1,
+              },
+            ],
+          },
+        ],
+      };
+
+      // Make REST API call
+      const response = await axios.post(
+        `${this.baseUrl}?key=${this.apiKey}`,
+        requestBody,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
+        }
+      );
+
+      if (response.data?.responses && response.data.responses.length > 0) {
+        const result = response.data.responses[0];
+
+        if (result.error) {
+          this.logger.error('Image properties error:', result.error);
+          return null;
+        }
+
+        return result.imagePropertiesAnnotation || null;
+      }
+
+      return null;
     } catch (error) {
-      this.logger.error('Image properties error:', error);
+      this.logger.error('Image properties error:', (error as Error).message);
       return null;
     }
   }
