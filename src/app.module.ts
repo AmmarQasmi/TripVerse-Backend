@@ -13,6 +13,7 @@ import { BookingsModule } from './bookings/bookings.module';
 import { PaymentsModule } from './payments/payments.module';
 import { MonumentsModule } from './monuments/monuments.module';
 import { WeatherModule } from './weather/weather.module';
+import { FlightsModule } from './flights/flights.module';
 import { AdminModule } from './admin/admin.module';
 import { CloudinaryModule } from './common/cloudinary/cloudinary.module';
 import { UploadModule } from './common/upload/upload.module';
@@ -38,6 +39,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 		PaymentsModule,
 		MonumentsModule,
 		WeatherModule,
+		FlightsModule,
 		AdminModule,
 		UploadModule,
 		NotificationsModule,
