@@ -17,8 +17,10 @@ import {
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { CarsService } from './cars.service';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
+import { OptionalJwtAuthGuard } from '../common/guards/optional-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '@prisma/client';
 import { imageUploadConfig } from '../common/config/multer.config';
 
@@ -36,12 +38,34 @@ export class CarsController {
 	}
 
 	/**
+	 * Get all car models
+	 * GET /cars/models
+	 */
+	@Get('models')
+	async getCarModels() {
+		return this.carsService.getAllCarModels();
+	}
+
+	/**
 	 * Get car details by ID
 	 * GET /cars/:id
+	 * Uses optional authentication to allow both authenticated and unauthenticated access
 	 */
 	@Get(':id')
-	async findOne(@Param('id', ParseIntPipe) id: number) {
-		return this.carsService.findOne(id);
+	@UseGuards(OptionalJwtAuthGuard)
+	async findOne(
+		@Param('id', ParseIntPipe) id: number,
+		@CurrentUser() user?: any,
+	) {
+		const isAdmin = user?.role === Role.admin;
+		let driverId: number | undefined;
+		
+		// If user is a driver, get their user ID to allow viewing their own cars
+		if (user && user.role === Role.driver) {
+			driverId = user.id;
+		}
+		
+		return this.carsService.findOne(id, isAdmin, driverId);
 	}
 
 	/**
@@ -230,6 +254,23 @@ export class CarsController {
 		return this.carsService.getDriverCars(driverId);
 	}
 
+	/**
+	 * Update car availability/listing status (Driver only)
+	 * PATCH /cars/:id/availability
+	 * Body: { is_listed: true }
+	 */
+	@Patch(':id/availability')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	async updateCarAvailability(
+		@Param('id', ParseIntPipe) carId: number,
+		@Body() data: { is_listed?: boolean },
+		@Request() req: any,
+	) {
+		const driverUserId = req.user.id;
+		return this.carsService.updateCarAvailability(carId, driverUserId, data);
+	}
+
 	// =====================
 	// ADMIN ENDPOINTS
 	// =====================
@@ -282,8 +323,9 @@ export class CarsController {
 		}
 		
 		// Verify the car belongs to the authenticated driver
-		const car = await this.carsService.findOne(carId);
-		if (car.driver.id !== req.user.id) {
+		// Pass driverId to allow viewing own car even if inactive
+		const car = await this.carsService.findOne(carId, false, req.user.id);
+		if (car.driver.id !== req.user.id.toString()) {
 			throw new BadRequestException('You can only upload images to your own cars');
 		}
 		
@@ -303,8 +345,9 @@ export class CarsController {
 		@Request() req: any,
 	) {
 		// Verify the car belongs to the authenticated driver
-		const car = await this.carsService.findOne(carId);
-		if (car.driver.id !== req.user.id) {
+		// Pass driverId to allow viewing own car even if inactive
+		const car = await this.carsService.findOne(carId, false, req.user.id);
+		if (car.driver.id !== req.user.id.toString()) {
 			throw new BadRequestException('You can only delete images from your own cars');
 		}
 		

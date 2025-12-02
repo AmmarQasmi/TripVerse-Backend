@@ -17,6 +17,7 @@ import { FilesInterceptor } from '@nestjs/platform-express';
 import { HotelsService } from './hotels.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
+import { OptionalJwtAuthGuard } from '../common/guards/optional-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -52,11 +53,25 @@ export class HotelsController {
 	/**
 	 * Get hotel details by ID
 	 * GET /hotels/:id
+	 * Uses optional authentication to allow both authenticated and unauthenticated access
 	 */
 	@Get(':id')
+	@UseGuards(OptionalJwtAuthGuard)
 	async findOne(@Param('id', ParseIntPipe) id: number, @CurrentUser() user?: any) {
 		const isAdmin = user?.role === Role.admin;
-		return this.hotelsService.findOne(id, isAdmin);
+		let managerId: number | undefined;
+		
+		// If user is a hotel manager, get their manager ID to allow viewing their own hotels
+		if (user && user.role === Role.hotel_manager) {
+			try {
+				managerId = await this.getManagerId(user);
+			} catch (error) {
+				// If manager profile not found, just continue without managerId
+				managerId = undefined;
+			}
+		}
+		
+		return this.hotelsService.findOne(id, isAdmin, managerId);
 	}
 
 	/**

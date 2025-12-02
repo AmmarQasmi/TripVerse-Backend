@@ -371,6 +371,7 @@ model Car {
   color                String?
   license_plate        String?
   is_active            Boolean          @default(true)
+  is_listed            Boolean          @default(true)
   created_at           DateTime         @default(now())
   updated_at           DateTime         @updatedAt
 
@@ -382,6 +383,7 @@ model Car {
   @@index([driver_id])
   @@index([car_model_id])
   @@index([is_active])
+  @@index([is_listed])
   @@index([base_price_per_day])
   @@index([transmission])
   @@index([fuel_type])

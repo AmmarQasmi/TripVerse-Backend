@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
@@ -39,6 +39,7 @@ export class CarsService {
 		// Build WHERE conditions
 		const where: any = {
 			is_active: true,
+			is_listed: true, // Only show listed cars
 			driver: {
 				is_verified: true, // Only verified drivers
 				user: {
@@ -196,12 +197,15 @@ export class CarsService {
 	/**
 	 * Get single car details
 	 */
-	async findOne(id: number) {
+	async findOne(id: number, isAdmin: boolean = false, driverId?: number) {
 		const car = await this.prisma.car.findUnique({
 			where: { id },
 			include: {
 				driver: {
-					include: {
+					select: {
+						id: true,
+						user_id: true,
+						is_verified: true,
 						user: {
 							select: {
 								id: true,
@@ -223,12 +227,26 @@ export class CarsService {
 			},
 		});
 
-		if (!car || !car.is_active) {
+		if (!car) {
 			throw new NotFoundException('Car not found');
 		}
 
-		if (!car.driver.is_verified) {
-			throw new NotFoundException('Driver not verified');
+		// For non-admin queries, check active status, driver verification and listing status
+		if (!isAdmin) {
+			// Check if this is the driver's own car
+			const isCarDriver = driverId !== undefined && car.driver.user_id === driverId;
+			
+			if (!isCarDriver) {
+				// For customers and drivers viewing other cars: car must be active, listed, and driver must be verified
+				if (!car.is_active || !car.driver.is_verified || !car.is_listed) {
+					throw new NotFoundException('Car not found');
+				}
+			} else {
+				// Drivers can view their own cars even if inactive, but driver must be verified
+				if (!car.driver.is_verified) {
+					throw new NotFoundException('Driver not verified');
+				}
+			}
 		}
 
 		return {
@@ -254,6 +272,8 @@ export class CarsService {
 				distance_rate_per_km: parseFloat(car.distance_rate_per_km.toString()),
 			},
 			images: car.images.map((img) => img.image_url),
+			is_active: car.is_active,
+			is_listed: car.is_listed,
 			createdAt: car.created_at.toISOString(),
 		};
 	}
@@ -1102,13 +1122,27 @@ export class CarsService {
 			throw new BadRequestException('Driver must be verified to add cars');
 		}
 
-		// Validate car model exists
-		const carModel = await this.prisma.carModel.findUnique({
-			where: { id: data.car_model_id },
+		// Validate make and model are provided
+		if (!data.make || !data.model) {
+			throw new BadRequestException('Car make and model are required');
+		}
+
+		// Find or create car model
+		let carModel = await this.prisma.carModel.findFirst({
+			where: {
+				make: data.make,
+				model: data.model,
+			},
 		});
 
 		if (!carModel) {
-			throw new NotFoundException('Car model not found');
+			// Create new car model if it doesn't exist
+			carModel = await this.prisma.carModel.create({
+				data: {
+					make: data.make,
+					model: data.model,
+				},
+			});
 		}
 
 		// Validate required fields
@@ -1145,7 +1179,7 @@ export class CarsService {
 			const newCar = await tx.car.create({
 				data: {
 					driver_id: driver.id,
-					car_model_id: data.car_model_id,
+					car_model_id: carModel.id,
 					seats: data.seats,
 					base_price_per_day: data.base_price_per_day,
 					distance_rate_per_km: data.distance_rate_per_km,
@@ -1154,7 +1188,8 @@ export class CarsService {
 					year: data.year,
 					color: data.color,
 					license_plate: data.license_plate,
-					is_active: true,
+					is_active: false, // Cars need admin approval before becoming active
+					is_listed: true, // Cars are listed by default, but only active ones are visible to customers
 				},
 			});
 
@@ -1252,9 +1287,31 @@ export class CarsService {
 			}
 		}
 
+		// Handle make/model update - find or create car model
+		let carModelId = car.car_model_id;
+		if (data.make && data.model) {
+			let carModel = await this.prisma.carModel.findFirst({
+				where: {
+					make: data.make,
+					model: data.model,
+				},
+			});
+
+			if (!carModel) {
+				carModel = await this.prisma.carModel.create({
+					data: {
+						make: data.make,
+						model: data.model,
+					},
+				});
+			}
+			carModelId = carModel.id;
+		}
+
 		const updatedCar = await this.prisma.car.update({
 			where: { id: carId },
 			data: {
+				car_model_id: carModelId,
 				seats: data.seats,
 				base_price_per_day: data.base_price_per_day,
 				distance_rate_per_km: data.distance_rate_per_km,
@@ -1496,7 +1553,7 @@ export class CarsService {
 			include: { driver: true }
 		});
 
-		if (!car || !car.is_active) {
+		if (!car) {
 			throw new NotFoundException('Car not found');
 		}
 
@@ -1599,5 +1656,67 @@ export class CarsService {
 					original: image.image_url
 				}
 		}));
+	}
+
+	/**
+	 * Get all car models
+	 */
+	async getAllCarModels() {
+		const carModels = await this.prisma.carModel.findMany({
+			orderBy: [
+				{ make: 'asc' },
+				{ model: 'asc' },
+			],
+		});
+
+		return carModels.map(model => ({
+			id: model.id,
+			make: model.make,
+			model: model.model,
+			displayName: `${model.make} ${model.model}`,
+		}));
+	}
+
+	/**
+	 * Update car availability/listing status
+	 */
+	async updateCarAvailability(carId: number, driverUserId: number, data: { is_listed?: boolean }) {
+		const car = await this.prisma.car.findUnique({
+			where: { id: carId },
+			include: {
+				driver: {
+					select: {
+						id: true,
+						user_id: true,
+						is_verified: true,
+					},
+				},
+			},
+		});
+
+		if (!car) {
+			throw new NotFoundException('Car not found');
+		}
+
+		if (car.driver.user_id !== driverUserId) {
+			throw new ForbiddenException('You can only update your own cars');
+		}
+
+		if (!car.driver.is_verified) {
+			throw new ForbiddenException('Driver must be verified to list cars');
+		}
+
+		const updated = await this.prisma.car.update({
+			where: { id: carId },
+			data: {
+				is_listed: data.is_listed !== undefined ? data.is_listed : car.is_listed,
+			},
+		});
+
+		return {
+			id: updated.id,
+			is_listed: updated.is_listed,
+			message: 'Car availability updated successfully',
+		};
 	}
 }
