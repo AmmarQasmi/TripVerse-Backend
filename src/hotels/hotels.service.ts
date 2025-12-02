@@ -143,7 +143,7 @@ export class HotelsService {
 	/**
 	 * Get single hotel with complete details
 	 */
-	async findOne(id: number, isAdmin: boolean = false) {
+	async findOne(id: number, isAdmin: boolean = false, managerId?: number) {
 		const hotel = await this.prisma.hotel.findUnique({
 			where: { id },
 			include: {
@@ -162,14 +162,25 @@ export class HotelsService {
 			},
 		});
 
-		if (!hotel || !hotel.is_active) {
+		if (!hotel) {
 			throw new NotFoundException('Hotel not found');
 		}
 
-		// For customer-facing queries, check manager verification and listing status
+		// For non-admin queries, check active status, manager verification and listing status
 		if (!isAdmin) {
-			if (!hotel.manager || !hotel.manager.is_verified || !hotel.is_listed) {
-				throw new NotFoundException('Hotel not found');
+			// Check if this is the hotel manager's own hotel
+			const isHotelManager = managerId !== undefined && hotel.manager_id === managerId;
+			
+			if (!isHotelManager) {
+				// For customers and managers viewing other hotels: hotel must be active, listed, and manager must be verified
+				if (!hotel.is_active || !hotel.manager || !hotel.manager.is_verified || !hotel.is_listed) {
+					throw new NotFoundException('Hotel not found');
+				}
+			} else {
+				// Hotel managers can view their own hotels even if inactive, but manager must be verified
+				if (!hotel.manager || !hotel.manager.is_verified) {
+					throw new NotFoundException('Hotel not found');
+				}
 			}
 		}
 
@@ -248,8 +259,8 @@ export class HotelsService {
 					address: data.address,
 					star_rating: data.star_rating || 4,
 					amenities: data.amenities || [],
-					is_active: true,
-					is_listed: false, // Hotels are not listed by default, manager must enable
+					is_active: false, // Hotels need admin approval before becoming active
+					is_listed: true, // Hotels are listed by default, but only active ones are visible to customers
 				},
 			});
 
