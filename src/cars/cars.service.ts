@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 import { AdminService } from '../admin/admin.service';
+import { GooglePlacesService } from '../common/services/google-places.service';
 
 @Injectable()
 export class CarsService {
@@ -12,6 +13,7 @@ export class CarsService {
 		private notificationsService: CommonNotificationsService,
 		@Inject(forwardRef(() => AdminService))
 		private adminService: AdminService,
+		private googlePlacesService: GooglePlacesService,
 	) {}
 
 	/**
@@ -612,13 +614,29 @@ export class CarsService {
 			},
 		});
 
-		// Send confirmation notifications
+		// Send confirmation notifications to customer and admin (not driver)
+		// Customer notification
 		await this.notificationsService.notifyBookingConfirmed(booking.user_id, bookingId, 'car');
-		await this.notificationsService.notifyBookingConfirmed(
-			booking.car.driver.user_id,
-			bookingId,
-			'car',
+		
+		// Notify all admins about payment received (platform fee)
+		const admins = await this.prisma.user.findMany({
+			where: { role: 'admin' },
+			select: { id: true },
+		});
+		
+		const adminNotificationPromises = admins.map(admin =>
+			this.notificationsService.createNotification(
+				admin.id,
+				'payment_received',
+				'Payment Received - Car Booking',
+				`Car booking #${bookingId} payment of PKR ${parseFloat(booking.total_amount.toString()).toLocaleString()} has been received. Platform fee (5%): PKR ${parseFloat(booking.platform_fee.toString()).toLocaleString()}`,
+				{ booking_id: bookingId, booking_type: 'car', amount: parseFloat(booking.total_amount.toString()), platform_fee: parseFloat(booking.platform_fee.toString()) },
+			)
 		);
+		
+		await Promise.all(adminNotificationPromises);
+		
+		// Note: Driver is NOT notified here - they will be paid later when ride starts
 
 		return {
 			id: updatedBooking.id,
@@ -887,12 +905,24 @@ export class CarsService {
 	}
 
 	/**
-	 * Helper method to estimate distance (placeholder for Google Maps integration)
+	 * Helper method to estimate distance using Google Maps Distance Matrix API
 	 */
 	private async estimateDistance(pickup: string, dropoff: string): Promise<number> {
-		// TODO: Integrate with Google Maps Distance Matrix API
-		// For now, return a placeholder distance
-		return 100; // 100km placeholder
+		try {
+			const distance = await this.googlePlacesService.calculateDistance(pickup, dropoff);
+			
+			if (distance !== null) {
+				return distance;
+			}
+
+			// Fallback: Return a placeholder distance if API fails
+			// This could be improved with a city-to-city lookup table
+			return 100; // 100km placeholder
+		} catch (error) {
+			console.error('Error estimating distance:', error);
+			// Fallback to placeholder
+			return 100; // 100km placeholder
+		}
 	}
 
 	/**

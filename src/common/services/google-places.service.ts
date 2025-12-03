@@ -44,13 +44,23 @@ export class GooglePlacesService {
   private readonly apiKey: string;
   private readonly baseUrl = 'https://maps.googleapis.com/maps/api/place';
 
+  private readonly distanceMatrixApiKey: string;
+  private readonly distanceMatrixBaseUrl = 'https://maps.googleapis.com/maps/api/distancematrix';
+
   constructor(private configService: ConfigService) {
     this.apiKey = this.configService.get('GOOGLE_PLACES_API_KEY') || '';
+    this.distanceMatrixApiKey = this.configService.get('GOOGLE_DISTANCE_MATRIX_API_KEY') || this.apiKey;
     
     if (!this.apiKey || this.apiKey.trim() === '') {
       this.logger.warn('Google Places API key not configured');
     } else {
       this.logger.log('Google Places API initialized with API key');
+    }
+
+    if (!this.distanceMatrixApiKey || this.distanceMatrixApiKey.trim() === '') {
+      this.logger.warn('Google Distance Matrix API key not configured');
+    } else {
+      this.logger.log('Google Distance Matrix API initialized');
     }
   }
 
@@ -223,6 +233,69 @@ export class GooglePlacesService {
         });
       } else {
         this.logger.error('Error searching place by location:', (error as Error).message);
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Calculate driving distance between two locations using Distance Matrix API
+   * @param origin Origin location (e.g., "Karachi, Pakistan")
+   * @param destination Destination location (e.g., "Lahore, Pakistan")
+   * @returns Distance in kilometers, or null if calculation fails
+   */
+  async calculateDistance(origin: string, destination: string): Promise<number | null> {
+    try {
+      if (!this.distanceMatrixApiKey || this.distanceMatrixApiKey.trim() === '') {
+        this.logger.warn('Google Distance Matrix API key not configured');
+        return null;
+      }
+
+      this.logger.log(`Calculating distance from ${origin} to ${destination}`);
+
+      const response = await axios.get(`${this.distanceMatrixBaseUrl}/json`, {
+        params: {
+          origins: origin,
+          destinations: destination,
+          units: 'metric', // Returns distance in kilometers
+          key: this.distanceMatrixApiKey,
+        },
+        timeout: 10000,
+      });
+
+      if (response.data?.status === 'OK' && response.data?.rows?.[0]?.elements?.[0]?.status === 'OK') {
+        const element = response.data.rows[0].elements[0];
+        const distanceInMeters = element.distance.value;
+        const distanceInKm = distanceInMeters / 1000;
+        
+        this.logger.log(`Distance calculated: ${distanceInKm.toFixed(2)} km`);
+        return Math.round(distanceInKm * 10) / 10; // Round to 1 decimal place
+      }
+
+      // Handle API errors
+      if (response.data?.status === 'ZERO_RESULTS') {
+        this.logger.warn(`No route found between ${origin} and ${destination}`);
+        return null;
+      }
+
+      if (response.data?.status === 'NOT_FOUND') {
+        this.logger.warn(`Location not found: ${origin} or ${destination}`);
+        return null;
+      }
+
+      this.logger.error('Distance Matrix API error:', response.data?.status);
+      return null;
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+        this.logger.error('Error calculating distance:', {
+          message: axiosError.message,
+          status: axiosError.response?.status,
+          statusText: axiosError.response?.statusText,
+          responseData: axiosError.response?.data,
+        });
+      } else {
+        this.logger.error('Error calculating distance:', (error as Error).message);
       }
       return null;
     }
