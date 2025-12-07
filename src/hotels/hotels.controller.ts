@@ -15,7 +15,6 @@ import {
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { HotelsService } from './hotels.service';
-import { PrismaService } from '../prisma/prisma.service';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { OptionalJwtAuthGuard } from '../common/guards/optional-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -23,12 +22,14 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '@prisma/client';
 import { imageUploadConfig } from '../common/config/multer.config';
+import { PrismaService } from '../prisma/prisma.service';
+import { Inject } from '@nestjs/common';
 
 @Controller('hotels')
 export class HotelsController {
 	constructor(
 		private readonly hotelsService: HotelsService,
-		private readonly prisma: PrismaService,
+		@Inject(PrismaService) private readonly prisma: PrismaService,
 	) {}
 
 	private async getManagerId(user: any): Promise<number> {

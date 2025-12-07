@@ -214,6 +214,20 @@ export class CarsController {
 		return this.carsService.sendMessage(bookingId, senderId, body.message);
 	}
 
+	/**
+	 * Mark all unread messages in a chat as read
+	 * PATCH /cars/bookings/:id/chat/read
+	 */
+	@Patch('bookings/:id/chat/read')
+	@UseGuards(JwtAuthGuard)
+	async markMessagesAsRead(
+		@Param('id', ParseIntPipe) bookingId: number,
+		@Request() req: any,
+	) {
+		const userId = req.user.id;
+		return this.carsService.markMessagesAsRead(bookingId, userId);
+	}
+
 	// =====================
 	// DRIVER CAR MANAGEMENT (Admin/Driver endpoints)
 	// =====================

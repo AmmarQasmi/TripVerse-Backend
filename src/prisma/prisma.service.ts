@@ -74,6 +74,17 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 			await this.$connect();
 			this.logger.log('✅ Database connected successfully');
 			
+			// Set timezone to Pakistan (PKT - UTC+5) for all database operations
+			// Note: With PgBouncer in transaction mode, this might not persist.
+			// For production, consider setting timezone at database level:
+			// ALTER DATABASE your_database_name SET timezone = 'Asia/Karachi';
+			try {
+				await this.$executeRaw`SET timezone = 'Asia/Karachi'`;
+				this.logger.log('🕐 Database timezone set to Asia/Karachi (PKT - UTC+5)');
+			} catch (tzError) {
+				this.logger.warn('⚠️ Could not set timezone (may need database-level setting):', tzError);
+			}
+			
 			// Log connection info (without password)
 			const dbUrl = process.env.DATABASE_URL || '';
 			const host = dbUrl.match(/@([^:]+):/)?.[1] || 'unknown';
@@ -83,6 +94,7 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 			
 			if (port === '6543') {
 				this.logger.log('🔄 Transaction pooling mode enabled (PgBouncer)');
+				this.logger.warn('⚠️ With PgBouncer, timezone should be set at database level for persistence');
 			} else if (port === '5432') {
 				this.logger.warn('⚠️ Session mode detected - consider using port 6543 for production');
 			}

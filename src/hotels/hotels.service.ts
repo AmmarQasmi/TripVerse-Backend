@@ -1,12 +1,14 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Inject } from '@nestjs/common';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 
 @Injectable()
 export class HotelsService {
 	constructor(
-		private prisma: PrismaService,
-		private cloudinaryService: CloudinaryService
+		@Inject(PrismaService) private prisma: PrismaService,
+		private cloudinaryService: CloudinaryService,
+		private notificationsService: CommonNotificationsService,
 	) {}
 
 	/**
@@ -297,6 +299,42 @@ export class HotelsService {
 			return newHotel;
 		});
 
+		// Notify all admins about new hotel listing
+		try {
+			const admins = await this.prisma.user.findMany({
+				where: {
+					role: 'admin',
+					status: 'active',
+				},
+				select: {
+					id: true,
+				},
+			});
+
+			const manager = managerId ? await this.prisma.hotelManager.findUnique({
+				where: { id: managerId },
+				include: { user: { select: { full_name: true } } },
+			}) : null;
+
+			const managerName = manager?.user?.full_name || 'Hotel Manager';
+
+			for (const admin of admins) {
+				await this.notificationsService.createNotification(
+					admin.id,
+					'hotel_listing_created',
+					'New Hotel Listing Created',
+					`${managerName} has created a new hotel listing: ${hotel.name}. Review and activate it.`,
+					{
+						hotel_id: hotel.id,
+						manager_id: managerId,
+					},
+				);
+			}
+		} catch (error) {
+			// Don't fail hotel creation if notification fails
+			console.error('Failed to notify admins about hotel listing:', error);
+		}
+
 		return {
 			id: hotel.id,
 			name: hotel.name,
@@ -330,15 +368,22 @@ export class HotelsService {
 			}
 		}
 
+		const updateData: any = {
+			name: data.name,
+			description: data.description,
+			address: data.address,
+			star_rating: data.star_rating,
+			amenities: data.amenities,
+		};
+
+		// Allow admin to activate/deactivate hotels
+		if (isAdmin && data.is_active !== undefined) {
+			updateData.is_active = data.is_active;
+		}
+
 		const updated = await this.prisma.hotel.update({
 			where: { id },
-			data: {
-				name: data.name,
-				description: data.description,
-				address: data.address,
-				star_rating: data.star_rating,
-				amenities: data.amenities,
-			},
+			data: updateData,
 		});
 
 		return {

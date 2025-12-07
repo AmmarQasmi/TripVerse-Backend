@@ -1,12 +1,12 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 import { HotelBookingStatus } from '@prisma/client';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Injectable()
 export class BookingsService {
 	constructor(
-		private prisma: PrismaService,
+		@Inject(PrismaService) private prisma: PrismaService,
 		private notificationsService: CommonNotificationsService,
 	) {}
 
@@ -82,17 +82,36 @@ export class BookingsService {
 
 			const roomType = hotel.roomTypes[0];
 
-			// 2. Check for conflicting bookings (only CONFIRMED bookings block availability)
+			// 2. Check for conflicting bookings
+			// Include CONFIRMED bookings and non-expired PENDING_PAYMENT bookings (temporary reservations)
+			const now = new Date();
 			const conflictingBookings = await tx.hotelBooking.findMany({
 				where: {
 					hotel_id,
 					room_type_id,
-					status: HotelBookingStatus.CONFIRMED, // Only confirmed bookings block availability
-					OR: [
+					AND: [
+						// Date overlap check
 						{
-							AND: [
-								{ check_in: { lte: checkOutDate } },
-								{ check_out: { gte: checkInDate } },
+							OR: [
+								{
+									AND: [
+										{ check_in: { lte: checkOutDate } },
+										{ check_out: { gte: checkInDate } },
+									],
+								},
+							],
+						},
+						// Status check: CONFIRMED or non-expired PENDING_PAYMENT
+						{
+							OR: [
+								{ status: HotelBookingStatus.CONFIRMED },
+								{
+									status: HotelBookingStatus.PENDING_PAYMENT,
+									OR: [
+										{ expires_at: null }, // No expiration set (backward compatibility)
+										{ expires_at: { gt: now } }, // Not expired yet
+									],
+								},
 							],
 						},
 					],
@@ -115,7 +134,11 @@ export class BookingsService {
 			const basePricePerNight = parseFloat(roomType.base_price.toString());
 			const totalAmount = basePricePerNight * quantity * nights;
 
-			// 6. Create booking request (PENDING_PAYMENT status)
+			// 6. Set expiration time (15 minutes from now for temporary reservation)
+			const expiresAt = new Date();
+			expiresAt.setMinutes(expiresAt.getMinutes() + 15);
+
+			// 7. Create booking request (PENDING_PAYMENT status with expiration)
 			const newBooking = await tx.hotelBooking.create({
 				data: {
 					user_id,
@@ -127,6 +150,7 @@ export class BookingsService {
 					status: HotelBookingStatus.PENDING_PAYMENT,
 					total_amount: totalAmount,
 					currency: 'usd',
+					expires_at: expiresAt, // Temporary reservation expires in 15 minutes
 				},
 				include: {
 					hotel: {
@@ -154,6 +178,44 @@ export class BookingsService {
 			return newBooking;
 		});
 
+		// Notify hotel manager about new booking request
+		try {
+			const bookingWithManager = await this.prisma.hotelBooking.findUnique({
+				where: { id: booking.id },
+				include: {
+					hotel: {
+						include: {
+							manager: {
+								include: {
+									user: {
+										select: { id: true },
+									},
+								},
+							},
+						},
+					},
+					user: {
+						select: { full_name: true },
+					},
+				},
+			});
+
+			if (bookingWithManager?.hotel?.manager?.user?.id) {
+				await this.notificationsService.createNotification(
+					bookingWithManager.hotel.manager.user.id,
+					'hotel_booking_created',
+					'New Hotel Booking Request',
+					`${bookingWithManager.user.full_name} has created a booking request for ${booking.hotel.name}. Waiting for payment confirmation.`,
+					{
+						booking_id: booking.id,
+						hotel_id: booking.hotel.id,
+					},
+				);
+			}
+		} catch (error) {
+			console.error('Failed to notify hotel manager about booking request:', error);
+		}
+
 		// 7. Return formatted response
 		const nights = Math.ceil((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
 		const basePricePerNight = parseFloat(booking.room_type.base_price.toString());
@@ -162,6 +224,7 @@ export class BookingsService {
 			id: booking.id,
 			status: booking.status,
 			message: 'Hotel booking request created successfully. Please confirm with payment.',
+			expires_at: booking.expires_at?.toISOString() || null, // Include expiration time for frontend countdown
 			booking_details: {
 				hotel: {
 					id: booking.hotel.id.toString(),
@@ -231,6 +294,7 @@ export class BookingsService {
 			return {
 				id: booking.id,
 				status: booking.status,
+				expires_at: booking.expires_at?.toISOString() || null, // Include expiration for frontend
 				hotel: {
 					name: booking.hotel.name,
 					address: booking.hotel.address,
@@ -296,6 +360,7 @@ export class BookingsService {
 		return {
 			id: booking.id,
 			status: booking.status,
+			expires_at: booking.expires_at?.toISOString() || null, // Include expiration for frontend
 			hotel: {
 				id: booking.hotel.id.toString(),
 				name: booking.hotel.name,
@@ -346,6 +411,18 @@ export class BookingsService {
 			throw new BadRequestException('Booking is not in pending payment status');
 		}
 
+		// Check if booking has expired
+		if (booking.expires_at && booking.expires_at < new Date()) {
+			// Auto-cancel expired booking
+			await this.prisma.hotelBooking.update({
+				where: { id: bookingId },
+				data: {
+					status: HotelBookingStatus.CANCELLED,
+				},
+			});
+			throw new BadRequestException('Booking has expired. Please create a new booking.');
+		}
+
 		// TODO: Process payment with Stripe
 		// For now, simulate successful payment
 		const payment = {
@@ -354,17 +431,93 @@ export class BookingsService {
 			status: 'completed',
 		};
 
-		// Update booking status to CONFIRMED
+		// Update booking status to CONFIRMED and clear expiration
 		const updatedBooking = await this.prisma.hotelBooking.update({
 			where: { id: bookingId },
 			data: {
 				status: HotelBookingStatus.CONFIRMED,
+				expires_at: null, // Clear expiration once confirmed
 			},
 		});
 
 		// TODO: Create payment transaction record
-		// Send confirmation notification
+		// Send confirmation notification to client
 		await this.notificationsService.notifyBookingConfirmed(userId, bookingId, 'hotel');
+
+		// Notify hotel manager about confirmed booking
+		try {
+			const bookingWithHotel = await this.prisma.hotelBooking.findUnique({
+				where: { id: bookingId },
+				include: {
+					hotel: {
+						include: {
+							manager: {
+								include: {
+									user: {
+										select: { id: true, full_name: true },
+									},
+								},
+							},
+						},
+					},
+					user: {
+						select: { full_name: true },
+					},
+				},
+			});
+
+			if (bookingWithHotel?.hotel?.manager?.user?.id) {
+				await this.notificationsService.createNotification(
+					bookingWithHotel.hotel.manager.user.id,
+					'hotel_booking_confirmed',
+					'Hotel Booking Confirmed',
+					`${bookingWithHotel.user.full_name} has confirmed and paid for a booking at ${bookingWithHotel.hotel.name}`,
+					{
+						booking_id: bookingId,
+						hotel_id: bookingWithHotel.hotel.id,
+					},
+				);
+			}
+		} catch (error) {
+			console.error('Failed to notify hotel manager about booking confirmation:', error);
+		}
+
+		// Notify all admins about hotel booking payment
+		try {
+			const admins = await this.prisma.user.findMany({
+				where: {
+					role: 'admin',
+					status: 'active',
+				},
+				select: {
+					id: true,
+				},
+			});
+
+			const bookingWithHotel = await this.prisma.hotelBooking.findUnique({
+				where: { id: bookingId },
+				include: {
+					hotel: {
+						select: { name: true },
+					},
+				},
+			});
+
+			for (const admin of admins) {
+				await this.notificationsService.createNotification(
+					admin.id,
+					'hotel_booking_payment_received',
+					'Hotel Booking Payment Received',
+					`Hotel booking #${bookingId} payment of PKR ${parseFloat(updatedBooking.total_amount.toString()).toLocaleString()} has been received for ${bookingWithHotel?.hotel?.name || 'Hotel'}`,
+					{
+						booking_id: bookingId,
+						amount: parseFloat(updatedBooking.total_amount.toString()),
+					},
+				);
+			}
+		} catch (error) {
+			console.error('Failed to notify admins about hotel booking payment:', error);
+		}
 
 		return {
 			id: updatedBooking.id,

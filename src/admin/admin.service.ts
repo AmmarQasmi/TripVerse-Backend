@@ -577,6 +577,7 @@ export class AdminService {
 				NotificationType.suspension_started,
 				'Account Suspended',
 				`Your account has been temporarily suspended. Reason: ${dto.reason}`,
+				{ driver_id: driverId },
 			);
 
 			return {
@@ -727,6 +728,7 @@ export class AdminService {
 					NotificationType.suspension_paused,
 					'Suspension Scheduled - Paused',
 					`Your account suspension has been scheduled but is paused due to an active ride. It will resume after your current trip completes.`,
+					{ driver_id: driverId },
 				);
 			}
 		} else {
@@ -779,6 +781,7 @@ export class AdminService {
 			action.action_type === 'ban'
 				? `Your account has been permanently banned due to ${action.dispute_count} disputes within the tracking period.`
 				: `Your account has been suspended for ${action.suspension_days} days due to ${action.dispute_count} disputes.`,
+			{ driver_id: driverId },
 		);
 	}
 
@@ -820,6 +823,7 @@ export class AdminService {
 				NotificationType.suspension_paused,
 				'Suspension Paused',
 				`Your account suspension has been paused due to an active ride. It will resume after your current trip completes.`,
+				{ driver_id: driverId },
 			);
 			}
 
@@ -890,6 +894,7 @@ export class AdminService {
 						NotificationType.suspension_resumed,
 						'Suspension Resumed',
 						`Your account suspension has been resumed after your trip completion.`,
+						{ driver_id: driverId },
 					);
 				}
 			}
@@ -1038,6 +1043,7 @@ export class AdminService {
 				NotificationType.ban_scheduled,
 				'Account Ban Scheduled',
 				`Your account ban has been scheduled but is paused due to an active ride. It will be applied after your current trip completes. Reason: ${dto.reason}`,
+				{ driver_id: driverId },
 			);
 
 			return {
@@ -1080,6 +1086,7 @@ export class AdminService {
 				NotificationType.ban_applied,
 				'Account Banned',
 				`Your account has been permanently banned. Reason: ${dto.reason}`,
+				{ driver_id: driverId },
 			);
 
 			return {
@@ -1338,6 +1345,11 @@ export class AdminService {
 				'dispute_raised',
 				'New Dispute Raised',
 				`A new dispute has been raised: ${description.substring(0, 100)}...`,
+				{
+					dispute_id: dispute.id,
+					booking_type: booking_car_id ? 'car' : 'hotel',
+					booking_id: booking_car_id || booking_hotel_id,
+				},
 			);
 		}
 
@@ -1352,6 +1364,11 @@ export class AdminService {
 				'dispute_raised',
 				'Dispute Raised Against You',
 				`A dispute has been raised regarding your booking. Please review and respond.`,
+				{
+					dispute_id: dispute.id,
+					booking_type: booking_car_id ? 'car' : 'hotel',
+					booking_id: booking_car_id || booking_hotel_id,
+				},
 			);
 		}
 
@@ -1417,6 +1434,11 @@ export class AdminService {
 				'dispute_resolved',
 				'Dispute Resolved',
 				`Your dispute has been resolved: ${dto.resolution}`,
+				{
+					dispute_id: disputeId,
+					booking_type: dispute.booking_hotel_id ? 'hotel' : 'car',
+					booking_id: dispute.booking_hotel_id || dispute.booking_car_id,
+				},
 			);
 		}
 

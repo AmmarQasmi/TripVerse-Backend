@@ -1,9 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
+import { NotificationsGateway } from './notifications.gateway';
 
 @Injectable()
 export class NotificationsService {
-	constructor(private commonNotificationsService: CommonNotificationsService) {}
+	constructor(
+		private commonNotificationsService: CommonNotificationsService,
+		private notificationsGateway: NotificationsGateway,
+	) {}
 
 	async getUserNotifications(userId: number, unreadOnly?: boolean) {
 		return this.commonNotificationsService.getUserNotifications(userId, unreadOnly);
