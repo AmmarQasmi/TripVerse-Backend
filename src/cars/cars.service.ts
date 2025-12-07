@@ -1,19 +1,22 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Inject, forwardRef } from '@nestjs/common';
-import { PrismaService } from '../prisma/prisma.service';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Inject, forwardRef, Optional } from '@nestjs/common';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 import { AdminService } from '../admin/admin.service';
 import { GooglePlacesService } from '../common/services/google-places.service';
+import { PrismaService } from '../prisma/prisma.service';
+import { ChatGateway } from './chat.gateway';
 
 @Injectable()
 export class CarsService {
 	constructor(
-		private prisma: PrismaService,
+		@Inject(PrismaService) private prisma: PrismaService,
 		private cloudinaryService: CloudinaryService,
 		private notificationsService: CommonNotificationsService,
 		@Inject(forwardRef(() => AdminService))
 		private adminService: AdminService,
 		private googlePlacesService: GooglePlacesService,
+		@Optional() @Inject(forwardRef(() => ChatGateway))
+		private chatGateway?: ChatGateway,
 	) {}
 
 	/**
@@ -1045,7 +1048,7 @@ export class CarsService {
 			},
 		});
 
-		return {
+		const messageData = {
 			id: newMessage.id,
 			sender: {
 				id: newMessage.sender.id.toString(),
@@ -1053,6 +1056,95 @@ export class CarsService {
 			},
 			message: newMessage.message,
 			sent_at: newMessage.sent_at.toISOString(),
+		};
+
+		// Determine recipient and create notification
+		const recipientId = isCustomer 
+			? booking.car.driver.user_id 
+			: booking.user_id;
+
+		// Create notification for recipient (only if they're not the sender)
+		if (recipientId !== senderId) {
+			const messagePreview = message.length > 50 
+				? `${message.substring(0, 50)}...` 
+				: message;
+
+			await this.notificationsService.createNotification(
+				recipientId,
+				'chat_message',
+				'New Chat Message',
+				`${newMessage.sender.full_name} sent you a message: ${messagePreview}`,
+				{
+					booking_id: bookingId,
+					booking_type: 'car',
+					message_id: newMessage.id,
+					sender_id: senderId,
+					sender_name: newMessage.sender.full_name,
+				}
+			);
+		}
+
+		// Emit real-time message via WebSocket
+		if (this.chatGateway) {
+			this.chatGateway.emitNewMessage(bookingId, messageData);
+		}
+
+		return messageData;
+	}
+
+	/**
+	 * Mark all unread messages in a chat as read
+	 */
+	async markMessagesAsRead(bookingId: number, userId: number) {
+		const booking = await this.prisma.carBooking.findUnique({
+			where: { id: bookingId },
+			include: {
+				car: {
+					include: {
+						driver: true,
+					},
+				},
+			},
+		});
+
+		if (!booking) {
+			throw new NotFoundException('Booking not found');
+		}
+
+		// Check if user is authorized to view chat
+		const isCustomer = booking.user_id === userId;
+		const isDriver = booking.car.driver.user_id === userId;
+
+		if (!isCustomer && !isDriver) {
+			throw new BadRequestException('You are not authorized to view this chat');
+		}
+
+		// Get chat
+		const chat = await this.prisma.chat.findUnique({
+			where: { booking_id: bookingId },
+		});
+
+		if (!chat) {
+			return { message: 'No chat found', marked_count: 0 };
+		}
+
+		// Mark all messages sent by the other user (not by current user) as read
+		const otherUserId = isCustomer ? booking.car.driver.user_id : booking.user_id;
+
+		const result = await this.prisma.chatMessage.updateMany({
+			where: {
+				chat_id: chat.id,
+				sender_id: otherUserId, // Only mark messages from the other user
+				read_at: null, // Only mark unread messages
+			},
+			data: {
+				read_at: new Date(),
+			},
+		});
+
+		return {
+			message: 'Messages marked as read',
+			marked_count: result.count,
 		};
 	}
 

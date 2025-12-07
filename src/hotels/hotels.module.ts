@@ -4,9 +4,10 @@ import { HotelsService } from './hotels.service';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { AuthModule } from '../auth/auth.module';
 import { CloudinaryModule } from '../common/cloudinary/cloudinary.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-	imports: [AuthModule, CloudinaryModule],
+	imports: [AuthModule, CloudinaryModule, NotificationsModule],
 	controllers: [HotelsController],
 	providers: [HotelsService, RolesGuard],
 })

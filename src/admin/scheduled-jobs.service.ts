@@ -1,13 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { AccountStatus, HotelBookingStatus } from '@prisma/client';
+import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { AccountStatus } from '@prisma/client';
 
 @Injectable()
 export class ScheduledJobsService {
 	private readonly logger = new Logger(ScheduledJobsService.name);
 
-	constructor(private prisma: PrismaService) {}
+	constructor(
+		@Inject(PrismaService) private prisma: PrismaService,
+		private notificationsService: CommonNotificationsService,
+	) {}
 
 	/**
 	 * Run daily at 5 AM to check and apply scheduled suspensions/bans
@@ -202,6 +206,76 @@ export class ScheduledJobsService {
 		}
 
 		this.logger.log(`Reset periods for ${expiredPeriods.length} drivers`);
+	}
+
+	/**
+	 * Cleanup expired hotel booking reservations
+	 * Runs every 15 minutes to cancel PENDING_PAYMENT bookings that have expired
+	 * Uses batch update for better performance
+	 */
+	@Cron('*/15 * * * *') // Every 15 minutes (optimized from 5 minutes)
+	async cleanupExpiredHotelBookings() {
+		this.logger.log('Starting expired hotel booking cleanup...');
+
+		const now = new Date();
+
+		// First, get expired bookings for notifications (only select needed fields)
+		const expiredBookings = await this.prisma.hotelBooking.findMany({
+			where: {
+				status: HotelBookingStatus.PENDING_PAYMENT,
+				expires_at: {
+					lte: now,
+				},
+			},
+			select: {
+				id: true,
+				user_id: true,
+				hotel: {
+					select: {
+						name: true,
+					},
+				},
+			},
+		});
+
+		if (expiredBookings.length === 0) {
+			this.logger.log('No expired bookings to cleanup');
+			return;
+		}
+
+		this.logger.log(`Found ${expiredBookings.length} expired booking(s) to cancel`);
+
+		// Batch update all expired bookings in one query (much more efficient)
+		const updateResult = await this.prisma.hotelBooking.updateMany({
+			where: {
+				status: HotelBookingStatus.PENDING_PAYMENT,
+				expires_at: {
+					lte: now,
+				},
+			},
+			data: {
+				status: HotelBookingStatus.CANCELLED,
+			},
+		});
+
+		this.logger.log(`Cancelled ${updateResult.count} expired booking(s) in batch`);
+
+		// Send notifications (can be done asynchronously, errors won't affect cleanup)
+		for (const booking of expiredBookings) {
+			try {
+				await this.notificationsService.createNotification(
+					booking.user_id,
+					'booking_request',
+					'Booking Expired',
+					`Your hotel booking for ${booking.hotel.name} has expired. The room reservation was held for 15 minutes. Please create a new booking if you still wish to proceed.`,
+					{ booking_id: booking.id, booking_type: 'hotel' },
+				);
+			} catch (error) {
+				this.logger.error(`Failed to send notification for booking ${booking.id}:`, error);
+			}
+		}
+
+		this.logger.log(`Completed expired booking cleanup. Cancelled ${updateResult.count} booking(s)`);
 	}
 }
 

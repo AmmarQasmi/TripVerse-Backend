@@ -17,6 +17,7 @@ export class NotificationsService {
 		title: string,
 		message: string,
 		payload?: any,
+		notificationsGateway?: any, // Optional gateway for real-time emission
 	): Promise<any> {
 		try {
 			const notification = await this.prisma.notification.create({
@@ -25,10 +26,31 @@ export class NotificationsService {
 					type,
 					title,
 					message,
+					payload: payload ? JSON.parse(JSON.stringify(payload)) : null,
 				},
 			});
 
 			this.logger.log(`Notification created for user ${userId}: ${type}`);
+
+			// Emit real-time notification if gateway is provided
+			if (notificationsGateway) {
+				const notificationData = {
+					id: notification.id,
+					type: notification.type,
+					title: notification.title,
+					message: notification.message,
+					payload: notification.payload,
+					sent_at: notification.sent_at.toISOString(),
+					read_at: notification.read_at?.toISOString() || null,
+					is_read: notification.read_at !== null,
+				};
+				notificationsGateway.emitNotification(userId, notificationData);
+
+				// Also emit updated unread count
+				const unreadCount = await this.getUnreadCount(userId);
+				notificationsGateway.emitUnreadCount(userId, unreadCount);
+			}
+
 			return notification;
 		} catch (error) {
 			this.logger.error(`Failed to create notification for user ${userId}:`, error);
@@ -155,9 +177,10 @@ export class NotificationsService {
 
 		await this.createNotification(
 			userId,
-			isApproved ? 'driver_verification' : 'driver_verification',
+			'driver_verification',
 			title,
 			message,
+			{ driver_id: userId },
 		);
 	}
 
@@ -183,7 +206,7 @@ export class NotificationsService {
 			'booking_accepted',
 			'Booking Accepted',
 			`${driverName} has accepted your booking request`,
-			{ booking_id: bookingId },
+			{ booking_id: bookingId, booking_type: 'car' },
 		);
 	}
 
@@ -196,7 +219,7 @@ export class NotificationsService {
 			'booking_rejected',
 			'Booking Rejected',
 			`${driverName} has rejected your booking request`,
-			{ booking_id: bookingId },
+			{ booking_id: bookingId, booking_type: 'car' },
 		);
 	}
 
@@ -209,7 +232,7 @@ export class NotificationsService {
 			'booking_confirmed',
 			'Booking Confirmed',
 			`Your ${bookingType} booking has been confirmed`,
-			{ booking_id: bookingId },
+			{ booking_id: bookingId, booking_type: bookingType },
 		);
 	}
 
@@ -222,7 +245,7 @@ export class NotificationsService {
 			'trip_started',
 			'Trip Started',
 			`${driverName} has started your trip`,
-			{ booking_id: bookingId },
+			{ booking_id: bookingId, booking_type: 'car' },
 		);
 	}
 
@@ -235,7 +258,7 @@ export class NotificationsService {
 			'trip_completed',
 			'Trip Completed',
 			`${driverName} has completed your trip`,
-			{ booking_id: bookingId },
+			{ booking_id: bookingId, booking_type: 'car' },
 		);
 	}
 
@@ -251,6 +274,7 @@ export class NotificationsService {
 			'hotel_manager_verification_approved',
 			'Hotel Manager Verification Approved',
 			`Congratulations ${managerName}! Your hotel manager verification has been approved. You can now create and manage hotels.`,
+			{ manager_id: userId },
 		);
 	}
 
@@ -267,6 +291,7 @@ export class NotificationsService {
 			'hotel_manager_verification_rejected',
 			'Hotel Manager Verification Rejected',
 			`Your hotel manager verification has been rejected. Reason: ${reason}. Please review your documents and try again.`,
+			{ manager_id: userId },
 		);
 	}
 
@@ -304,6 +329,9 @@ export class NotificationsService {
 					type === 'driver' ? 'driver_verification' : 'hotel_manager_verification_approved', // Reuse existing type
 					title,
 					message,
+					type === 'driver' 
+						? { user_email: userEmail } 
+						: { user_email: userEmail, manager_name: userName },
 				)
 			);
 

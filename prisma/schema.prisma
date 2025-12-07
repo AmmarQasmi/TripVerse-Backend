@@ -122,6 +122,11 @@ enum NotificationType {
   suspension_resumed
   ban_scheduled
   ban_applied
+  hotel_listing_created
+  hotel_booking_created
+  hotel_booking_confirmed
+  hotel_booking_payment_received
+  chat_message
 }
 
 // =====================
@@ -418,6 +423,7 @@ model HotelBooking {
   status       HotelBookingStatus
   total_amount Decimal            @db.Decimal(10, 2)
   currency     CurrencyCode
+  expires_at   DateTime? // Expiration time for PENDING_PAYMENT bookings (15 minutes)
   created_at   DateTime           @default(now())
   updated_at   DateTime           @updatedAt
 
@@ -431,6 +437,7 @@ model HotelBooking {
   @@index([user_id, created_at])
   @@index([status])
   @@index([hotel_id, check_in])
+  @@index([expires_at]) // Index for cleanup job to find expired bookings
 }
 
 model CarBooking {
@@ -616,6 +623,7 @@ model Notification {
   type    NotificationType
   title   String
   message String
+  payload Json? // Store IDs and metadata for redirects (booking_id, hotel_id, driver_id, dispute_id, etc.)
   sent_at DateTime         @default(now())
   read_at DateTime?
 
