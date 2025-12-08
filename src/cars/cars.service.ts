@@ -400,7 +400,7 @@ export class CarsService {
 				total_amount: priceCalculation.pricing_breakdown.total_amount,
 				driver_earnings: priceCalculation.pricing_breakdown.driver_earnings,
 				platform_fee: priceCalculation.pricing_breakdown.platform_fee,
-				currency: 'usd',
+				currency: 'PKR',
 				customer_notes,
 				requested_at: new Date(),
 			},
@@ -1310,8 +1310,8 @@ export class CarsService {
 					year: data.year,
 					color: data.color,
 					license_plate: data.license_plate,
-					is_active: false, // Cars need admin approval before becoming active
-					is_listed: true, // Cars are listed by default, but only active ones are visible to customers
+					is_active: true, // Cars are active by default when created
+					is_listed: true, // Cars are listed by default
 				},
 			});
 

@@ -149,7 +149,7 @@ export class BookingsService {
 					check_out: checkOutDate,
 					status: HotelBookingStatus.PENDING_PAYMENT,
 					total_amount: totalAmount,
-					currency: 'usd',
+					currency: 'PKR',
 					expires_at: expiresAt, // Temporary reservation expires in 15 minutes
 				},
 				include: {
