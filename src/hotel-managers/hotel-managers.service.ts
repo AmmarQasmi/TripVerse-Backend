@@ -586,7 +586,7 @@ export class HotelManagersService {
 		return {
 			total_earnings: managerEarnings,
 			total_bookings: earningsResult._count,
-			currency: 'USD',
+			currency: 'PKR',
 			bookings: bookings.map((booking) => ({
 				id: booking.id,
 				customer_name: booking.user.full_name,

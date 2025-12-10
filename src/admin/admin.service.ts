@@ -137,9 +137,9 @@ export class AdminService {
 				total: totalBookings,
 			},
 			revenue: {
-				total: totalRevenue,
-				commission: totalCommission,
-				currency: 'USD',
+			total: totalRevenue,
+			commission: totalCommission,
+			currency: 'PKR',
 			},
 			disputes: {
 				pending: pendingDisputes,
@@ -1689,7 +1689,7 @@ export class AdminService {
 			total_revenue: parseFloat(revenue._sum.amount?.toString() || '0'),
 			total_commission: parseFloat(revenue._sum.application_fee_amount?.toString() || '0'),
 			total_transactions: revenue._count,
-			currency: 'USD',
+			currency: 'PKR',
 		};
 	}
 

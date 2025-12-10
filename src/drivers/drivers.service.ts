@@ -618,7 +618,7 @@ export class DriversService {
 		return {
 			total_earnings: parseFloat(earningsResult._sum.driver_earnings?.toString() || '0'),
 			total_completed_bookings: earningsResult._count,
-			currency: 'USD',
+			currency: 'PKR',
 			bookings: bookings.map((booking) => ({
 				id: booking.id,
 				customer_name: booking.user.full_name,
