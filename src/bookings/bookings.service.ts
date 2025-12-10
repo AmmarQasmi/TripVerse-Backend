@@ -148,9 +148,9 @@ export class BookingsService {
 					check_in: checkInDate,
 					check_out: checkOutDate,
 					status: HotelBookingStatus.PENDING_PAYMENT,
-					total_amount: totalAmount,
-					currency: 'PKR',
-					expires_at: expiresAt, // Temporary reservation expires in 15 minutes
+				total_amount: totalAmount,
+				currency: 'pkr',
+				expires_at: expiresAt, // Temporary reservation expires in 15 minutes
 				},
 				include: {
 					hotel: {
@@ -178,37 +178,54 @@ export class BookingsService {
 			return newBooking;
 		});
 
-		// Notify hotel manager about new booking request
-		try {
-			const bookingWithManager = await this.prisma.hotelBooking.findUnique({
-				where: { id: booking.id },
-				include: {
-					hotel: {
-						include: {
-							manager: {
-								include: {
-									user: {
-										select: { id: true },
-									},
+		// Fetch booking with all needed relations for TypeScript type inference
+		const bookingWithRelations = await this.prisma.hotelBooking.findUnique({
+			where: { id: booking.id },
+			include: {
+				hotel: {
+					select: { 
+						id: true, 
+						name: true, 
+						address: true,
+						city: { select: { name: true } },
+						manager: {
+							include: {
+								user: {
+									select: { id: true },
 								},
 							},
 						},
 					},
-					user: {
-						select: { full_name: true },
+				},
+				room_type: {
+					select: { 
+						id: true, 
+						name: true, 
+						base_price: true,
+						max_occupancy: true 
 					},
 				},
-			});
+				user: {
+					select: { id: true, full_name: true, email: true },
+				},
+			},
+		});
 
-			if (bookingWithManager?.hotel?.manager?.user?.id) {
+		if (!bookingWithRelations) {
+			throw new NotFoundException('Booking not found after creation');
+		}
+
+		// Notify hotel manager about new booking request
+		try {
+			if (bookingWithRelations?.hotel?.manager?.user?.id) {
 				await this.notificationsService.createNotification(
-					bookingWithManager.hotel.manager.user.id,
+					bookingWithRelations.hotel.manager.user.id,
 					'hotel_booking_created',
 					'New Hotel Booking Request',
-					`${bookingWithManager.user.full_name} has created a booking request for ${booking.hotel.name}. Waiting for payment confirmation.`,
+					`${bookingWithRelations.user.full_name} has created a booking request for ${bookingWithRelations.hotel.name}. Waiting for payment confirmation.`,
 					{
 						booking_id: booking.id,
-						hotel_id: booking.hotel.id,
+						hotel_id: bookingWithRelations.hotel.id,
 					},
 				);
 			}
@@ -218,41 +235,41 @@ export class BookingsService {
 
 		// 7. Return formatted response
 		const nights = Math.ceil((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
-		const basePricePerNight = parseFloat(booking.room_type.base_price.toString());
+		const basePricePerNight = parseFloat(bookingWithRelations.room_type.base_price.toString());
 
 		return {
-			id: booking.id,
-			status: booking.status,
+			id: bookingWithRelations.id,
+			status: bookingWithRelations.status,
 			message: 'Hotel booking request created successfully. Please confirm with payment.',
-			expires_at: booking.expires_at?.toISOString() || null, // Include expiration time for frontend countdown
+			expires_at: bookingWithRelations.expires_at?.toISOString() || null, // Include expiration time for frontend countdown
 			booking_details: {
 				hotel: {
-					id: booking.hotel.id.toString(),
-					name: booking.hotel.name,
-					address: booking.hotel.address,
-					city: booking.hotel.city.name,
+					id: bookingWithRelations.hotel.id.toString(),
+					name: bookingWithRelations.hotel.name,
+					address: bookingWithRelations.hotel.address,
+					city: bookingWithRelations.hotel.city.name,
 				},
 				room_type: {
-					id: booking.room_type.id.toString(),
-					name: booking.room_type.name,
-					max_occupancy: booking.room_type.max_occupancy,
+					id: bookingWithRelations.room_type.id.toString(),
+					name: bookingWithRelations.room_type.name,
+					max_occupancy: bookingWithRelations.room_type.max_occupancy,
 					price_per_night: basePricePerNight,
 				},
 				dates: {
-					check_in: booking.check_in.toISOString().split('T')[0],
-					check_out: booking.check_out.toISOString().split('T')[0],
+					check_in: bookingWithRelations.check_in.toISOString().split('T')[0],
+					check_out: bookingWithRelations.check_out.toISOString().split('T')[0],
 					nights: nights,
 				},
 				pricing: {
 					base_price_per_night: basePricePerNight,
-					quantity: booking.quantity,
+					quantity: bookingWithRelations.quantity,
 					nights: nights,
-					total_amount: parseFloat(booking.total_amount.toString()),
-					currency: booking.currency,
+					total_amount: parseFloat(bookingWithRelations.total_amount.toString()),
+					currency: bookingWithRelations.currency,
 				},
 				guest_notes: guest_notes || null,
 			},
-			created_at: booking.created_at.toISOString(),
+			created_at: bookingWithRelations.created_at.toISOString(),
 		};
 	}
 

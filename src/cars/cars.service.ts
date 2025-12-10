@@ -400,7 +400,7 @@ export class CarsService {
 				total_amount: priceCalculation.pricing_breakdown.total_amount,
 				driver_earnings: priceCalculation.pricing_breakdown.driver_earnings,
 				platform_fee: priceCalculation.pricing_breakdown.platform_fee,
-				currency: 'PKR',
+				currency: 'pkr',
 				customer_notes,
 				requested_at: new Date(),
 			},
