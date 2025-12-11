@@ -38,7 +38,12 @@ export class GoogleVisionService {
         throw new BadRequestException('Google Vision API key is not configured');
       }
 
-      this.logger.log('Starting landmark detection...');
+      // Validate image buffer
+      if (!imageBuffer || imageBuffer.length === 0) {
+        throw new BadRequestException('Invalid image buffer provided');
+      }
+
+      this.logger.log(`Starting landmark detection... (image size: ${imageBuffer.length} bytes)`);
 
       // Convert image buffer to base64
       const base64Image = imageBuffer.toString('base64');
@@ -64,6 +69,7 @@ export class GoogleVisionService {
       };
 
       // Make REST API call
+      this.logger.debug(`Calling Google Vision API: ${this.baseUrl}`);
       const response = await axios.post(
         `${this.baseUrl}?key=${this.apiKey}`,
         requestBody,
@@ -75,11 +81,26 @@ export class GoogleVisionService {
         }
       );
 
+      // Log response status
+      this.logger.debug(`Google Vision API response status: ${response.status}`);
+
       const landmarks: LandmarkDetectionResult[] = [];
 
       // Parse response
       if (response.data?.responses && response.data.responses.length > 0) {
         const result = response.data.responses[0];
+
+        // Log full response for debugging when no landmarks found
+        if (!result.landmarkAnnotations || result.landmarkAnnotations.length === 0) {
+          this.logger.warn('Google Vision API returned no landmark annotations');
+          this.logger.debug('Full API response:', JSON.stringify(result, null, 2));
+          
+          // Check if there are other annotations that might help debug
+          if (result.labelAnnotations && result.labelAnnotations.length > 0) {
+            const labels = result.labelAnnotations.slice(0, 5).map((l: any) => l.description).join(', ');
+            this.logger.log(`Detected labels (not landmarks): ${labels}`);
+          }
+        }
 
         if (result.landmarkAnnotations && result.landmarkAnnotations.length > 0) {
           for (const annotation of result.landmarkAnnotations) {
@@ -117,6 +138,9 @@ export class GoogleVisionService {
             result.error.message || 'Failed to detect landmarks in image'
           );
         }
+      } else {
+        this.logger.warn('Google Vision API returned empty responses array');
+        this.logger.debug('Full API response:', JSON.stringify(response.data, null, 2));
       }
 
       this.logger.log(`Detected ${landmarks.length} landmarks`);
@@ -165,6 +189,74 @@ export class GoogleVisionService {
       // Handle other errors
       this.logger.error('Google Vision API error:', (error as Error).message);
       throw new BadRequestException('Failed to detect landmarks in image');
+    }
+  }
+
+  /**
+   * Detect labels in an image (useful for providing feedback when landmarks aren't detected)
+   */
+  async detectLabels(imageBuffer: Buffer): Promise<string[]> {
+    try {
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.logger.warn('Google Vision API key not configured, skipping label detection');
+        return [];
+      }
+
+      // Convert image buffer to base64
+      const base64Image = imageBuffer.toString('base64');
+
+      // Prepare REST API request
+      const requestBody = {
+        requests: [
+          {
+            image: {
+              content: base64Image,
+            },
+            features: [
+              {
+                type: 'LABEL_DETECTION',
+                maxResults: 10,
+              },
+            ],
+          },
+        ],
+      };
+
+      // Make REST API call
+      const response = await axios.post(
+        `${this.baseUrl}?key=${this.apiKey}`,
+        requestBody,
+        {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 30000,
+        }
+      );
+
+      const labels: string[] = [];
+
+      if (response.data?.responses && response.data.responses.length > 0) {
+        const result = response.data.responses[0];
+
+        if (result.labelAnnotations && result.labelAnnotations.length > 0) {
+          for (const annotation of result.labelAnnotations) {
+            if (annotation.description && annotation.score && annotation.score > 0.5) {
+              labels.push(annotation.description);
+            }
+          }
+        }
+
+        if (result.error) {
+          this.logger.error('Label detection error:', result.error);
+          return [];
+        }
+      }
+
+      return labels;
+    } catch (error) {
+      this.logger.error('Label detection error:', (error as Error).message);
+      return [];
     }
   }
 
