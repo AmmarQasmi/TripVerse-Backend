@@ -36,6 +36,14 @@ export class MonumentsController {
   }
 
   /**
+   * Test Google Vision API configuration
+   */
+  @Get('test-vision-config')
+  async testVisionConfig() {
+    return await this.monumentsService.testVisionConfig();
+  }
+
+  /**
    * Upload image and recognize monument
    */
   @Post('upload')

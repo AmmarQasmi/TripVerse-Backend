@@ -72,6 +72,24 @@ export class MonumentsService {
   ) {}
 
   /**
+   * Test Google Vision API configuration
+   */
+  async testVisionConfig(): Promise<{
+    apiKeyConfigured: boolean;
+    apiKeyLength: number;
+    message: string;
+  }> {
+    const apiKey = (this.googleVisionService as any).apiKey || '';
+    return {
+      apiKeyConfigured: !!apiKey && apiKey.trim() !== '',
+      apiKeyLength: apiKey ? apiKey.length : 0,
+      message: apiKey && apiKey.trim() !== '' 
+        ? 'Google Vision API key is configured' 
+        : 'Google Vision API key is NOT configured. Please check your .env file for GOOGLE_VISION_API_KEY.',
+    };
+  }
+
+  /**
    * Upload image and recognize monument
    */
   async recognizeMonument(
@@ -99,13 +117,26 @@ export class MonumentsService {
       let landmarks: LandmarkDetectionResult[] = [];
       try {
         landmarks = await this.googleVisionService.detectLandmarks(imageBuffer);
+        this.logger.log(`Google Vision returned ${landmarks.length} landmarks`);
       } catch (error: any) {
         this.logger.error('Google Vision API error:', error);
+        this.logger.error('Error details:', JSON.stringify({
+          message: error?.message,
+          status: error?.status,
+          response: error?.response?.data,
+        }, null, 2));
         
         // Check if it's a billing/permission error
         if (error?.message?.includes('PERMISSION_DENIED') || error?.message?.includes('billing')) {
           throw new BadRequestException(
             'Google Vision API requires billing to be enabled. Please enable billing on your Google Cloud project and try again.'
+          );
+        }
+        
+        // Check if it's an API key error
+        if (error?.message?.includes('API key') || error?.message?.includes('invalid') || error?.message?.includes('restricted')) {
+          throw new BadRequestException(
+            'Google Vision API key is invalid or restricted. Please check your API key configuration and ensure Vision API is enabled.'
           );
         }
         
@@ -115,11 +146,33 @@ export class MonumentsService {
         }
         
         // Generic error
-        throw new BadRequestException('Failed to detect landmarks in image. Please ensure Google Vision API is properly configured.');
+        throw new BadRequestException(
+          `Failed to detect landmarks in image: ${error?.message || 'Unknown error'}. Please ensure Google Vision API is properly configured.`
+        );
       }
       
       if (landmarks.length === 0) {
-        throw new BadRequestException('No monuments or landmarks detected in the image');
+        this.logger.warn('No landmarks detected in image. This could mean:');
+        this.logger.warn('1. The image does not contain recognizable landmarks');
+        this.logger.warn('2. The image quality is too low');
+        this.logger.warn('3. Google Vision API key restrictions or billing issues');
+        
+        // Try to detect labels to provide helpful feedback
+        let detectedLabels: string[] = [];
+        try {
+          detectedLabels = await this.googleVisionService.detectLabels(imageBuffer);
+          if (detectedLabels.length > 0) {
+            this.logger.log(`Detected labels in image: ${detectedLabels.slice(0, 5).join(', ')}`);
+          }
+        } catch (error) {
+          this.logger.warn('Label detection failed:', (error as Error).message);
+        }
+        
+        const helpfulMessage = detectedLabels.length > 0
+          ? `No famous landmarks detected in the image. Google Vision detected: ${detectedLabels.slice(0, 5).join(', ')}. Please try with a clear photo of a famous landmark (e.g., Eiffel Tower, Taj Mahal, Statue of Liberty, Big Ben, Colosseum).`
+          : 'No famous landmarks detected in the image. Google Vision API only recognizes well-known monuments and landmarks. Please try with a clear photo of a famous landmark (e.g., Eiffel Tower, Taj Mahal, Statue of Liberty, Big Ben, Colosseum).';
+        
+        throw new BadRequestException(helpfulMessage);
       }
 
       // Get the landmark with highest confidence
