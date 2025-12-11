@@ -102,7 +102,7 @@ export class AuthController {
 	 * - httpOnly: Prevents JavaScript access (XSS protection)
 	 * - secure: Only sent over HTTPS in production (FALSE for localhost)
 	 * - sameSite: CSRF protection (lax = allows top-level navigation)
-	 * - maxAge: Cookie expiration (7 days in milliseconds)
+	 * - maxAge: Cookie expiration (24 hours in milliseconds)
 	 * - path: Cookie available for all routes
 	 */
 	private setAuthCookie(res: Response, token: string) {
