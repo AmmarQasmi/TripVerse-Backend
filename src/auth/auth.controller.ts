@@ -6,6 +6,7 @@ import { LoginDto } from './dto/login.dto';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 
+
 @Controller('auth')
 export class AuthController {
 	constructor(private readonly authService: AuthService) {}
