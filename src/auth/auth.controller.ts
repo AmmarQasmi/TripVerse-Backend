@@ -56,12 +56,13 @@ export class AuthController {
 	@Post('logout')
 	@HttpCode(HttpStatus.OK)
 	async logout(@Res({ passthrough: true }) res: Response) {
-		// Clear the httpOnly cookie
+		// Clear the httpOnly cookie with same options as when set
 		res.clearCookie('access_token', {
 			httpOnly: true,
-			secure: process.env.NODE_ENV === 'production',
+			secure: false,
 			sameSite: 'lax',
 			path: '/',
+			// Domain NOT set - matches cookie creation
 		});
 		
 		return {
@@ -106,23 +107,23 @@ export class AuthController {
 	 * - path: Cookie available for all routes
 	 */
 	private setAuthCookie(res: Response, token: string) {
-		const isDevelopment = process.env.NODE_ENV !== 'production';
+		const isProduction = process.env.NODE_ENV === 'production';
+		
+		const cookieOptions = {
+			httpOnly: true,
+			secure: isProduction, // Use HTTPS in production
+			sameSite: isProduction ? ('none' as const) : ('lax' as const), // 'none' for cross-site in production
+			maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+			path: '/',
+			// Domain NOT set - works for both localhost and production domains
+		};
 		
 		console.log('🍪 Setting cookie:', {
-			httpOnly: true,
-			secure: !isDevelopment,
-			sameSite: 'lax',
-			maxAge: 7 * 24 * 60 * 60 * 1000,
+			...cookieOptions,
 			tokenPreview: token.substring(0, 20) + '...',
 		});
 		
-		res.cookie('access_token', token, {
-			httpOnly: true,
-			secure: false, // MUST be false for localhost (http)
-			sameSite: 'lax',
-			maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-			path: '/',
-		});
+		res.cookie('access_token', token, cookieOptions);
 	}
 }
 
