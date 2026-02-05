@@ -57,13 +57,14 @@ export class AuthController {
 	@Post('logout')
 	@HttpCode(HttpStatus.OK)
 	async logout(@Res({ passthrough: true }) res: Response) {
+		const isProduction = process.env.NODE_ENV === 'production';
+		
 		// Clear the httpOnly cookie with same options as when set
 		res.clearCookie('access_token', {
 			httpOnly: true,
-			secure: false,
-			sameSite: 'lax',
+			secure: isProduction,
+			sameSite: isProduction ? 'none' : 'lax',
 			path: '/',
-			// Domain NOT set - matches cookie creation
 		});
 		
 		return {
@@ -103,28 +104,34 @@ export class AuthController {
 	 * Cookie flags explanation:
 	 * - httpOnly: Prevents JavaScript access (XSS protection)
 	 * - secure: Only sent over HTTPS in production (FALSE for localhost)
-	 * - sameSite: CSRF protection (lax = allows top-level navigation)
-	 * - maxAge: Cookie expiration (24 hours in milliseconds)
+	 * - sameSite: CSRF protection (none = allows cross-site for Vercel-Render)
+	 * - maxAge: Cookie expiration (7 days in milliseconds)
 	 * - path: Cookie available for all routes
 	 */
 	private setAuthCookie(res: Response, token: string) {
 		const isProduction = process.env.NODE_ENV === 'production';
 		
-		const cookieOptions = {
+		const cookieOptions: any = {
 			httpOnly: true,
 			secure: isProduction, // Use HTTPS in production
-			sameSite: isProduction ? ('none' as const) : ('lax' as const), // 'none' for cross-site in production
+			sameSite: isProduction ? 'none' : 'lax', // 'none' for cross-site in production
 			maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
 			path: '/',
-			// Domain NOT set - works for both localhost and production domains
 		};
 		
-		console.log('🍪 Setting cookie:', {
-			...cookieOptions,
+		console.log('🍪 Setting cookie with options:', {
+			isProduction,
+			secure: cookieOptions.secure,
+			sameSite: cookieOptions.sameSite,
+			httpOnly: cookieOptions.httpOnly,
+			tokenLength: token.length,
 			tokenPreview: token.substring(0, 20) + '...',
 		});
 		
 		res.cookie('access_token', token, cookieOptions);
+		
+		// Log response headers for debugging
+		console.log('📝 Set-Cookie header should be sent');
 	}
 }
 
