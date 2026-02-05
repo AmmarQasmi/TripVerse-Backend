@@ -21,6 +21,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 					let token = null;
 					if (request && request.cookies) {
 						token = request.cookies['access_token'];
+						console.log('🔍 JWT Strategy - Cookie extraction:', {
+							hasCookies: !!request.cookies,
+							cookieNames: Object.keys(request.cookies || {}),
+							hasAccessToken: !!token,
+							tokenPreview: token ? token.substring(0, 20) + '...' : null,
+						});
+					} else {
+						console.log('🔍 JWT Strategy - No cookies found in request');
 					}
 					return token;
 				},
@@ -30,9 +38,17 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 			ignoreExpiration: false,
 			secretOrKey: process.env.JWT_SECRET || 'your-secret-key-change-this-in-production',
 		});
+		
+		console.log('🔐 JWT Strategy initialized with secret:', process.env.JWT_SECRET ? 'SET' : 'USING DEFAULT');
 	}
 
 	async validate(payload: JwtPayload) {
+		console.log('✅ JWT Strategy - Token validated, payload:', {
+			sub: payload.sub,
+			email: payload.email,
+			role: payload.role,
+		});
+		
 		const user = await this.prisma.user.findUnique({
 			where: { id: payload.sub },
 			select: {
@@ -48,17 +64,21 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 		});
 
 		if (!user) {
+			console.log('❌ JWT Strategy - User not found for id:', payload.sub);
 			throw new UnauthorizedException('User not found');
 		}
 
 		// Check if account is banned or inactive
 		if (user.status === 'banned') {
+			console.log('❌ JWT Strategy - User banned:', user.email);
 			throw new UnauthorizedException('Your account has been banned');
 		}
 		if (user.status === 'inactive') {
+			console.log('❌ JWT Strategy - User inactive:', user.email);
 			throw new UnauthorizedException('Your account is inactive');
 		}
 
+		console.log('✅ JWT Strategy - User validated:', user.email);
 		return user;
 	}
 }
