@@ -26,7 +26,11 @@
     "@nestjs/schedule": "^4.1.2",
     "@nestjs/websockets": "^10.4.20",
     "@prisma/client": "^6.16.3",
+    "@types/bcrypt": "^6.0.0",
+    "@types/cookie-parser": "^1.4.7",
     "@types/multer": "^2.0.0",
+    "@types/node": "^20.19.22",
+    "@types/passport-jwt": "^4.0.1",
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
@@ -49,10 +53,6 @@
   "devDependencies": {
     "@nestjs/schematics": "^10.0.0",
     "@nestjs/testing": "^10.4.20",
-    "@types/bcrypt": "^6.0.0",
-    "@types/cookie-parser": "^1.4.7",
-    "@types/node": "^20.19.22",
-    "@types/passport-jwt": "^4.0.1",
     "prettier": "^3.3.3"
   }
 }
