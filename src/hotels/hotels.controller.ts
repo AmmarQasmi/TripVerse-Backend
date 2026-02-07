@@ -24,6 +24,8 @@ import { Role } from '@prisma/client';
 import { imageUploadConfig } from '../common/config/multer.config';
 import { PrismaService } from '../prisma/prisma.service';
 import { Inject } from '@nestjs/common';
+import { SearchFiltersDto } from './dto/search-filters.dto';
+import { CreateReviewDto } from './dto/create-review.dto';
 
 @Controller('hotels')
 export class HotelsController {
@@ -43,12 +45,110 @@ export class HotelsController {
 	}
 
 	/**
-	 * Search hotels with filters
+	 * Health check
+	 * GET /hotels/health
+	 */
+	@Get('health')
+	health() {
+		return { ok: true, service: 'hotels' };
+	}
+
+	/**
+	 * Get popular destinations with stats
+	 * GET /hotels/popular-destinations
+	 */
+	@Get('popular-destinations')
+	async getPopularDestinations() {
+		return this.hotelsService.getPopularDestinations();
+	}
+
+	/**
+	 * Search hotels with availability checking
+	 * GET /hotels/search?city=Islamabad&checkin=2025-03-01&checkout=2025-03-05&guests=2&rooms=1
+	 */
+	@Get('search')
+	async searchHotels(@Query() filters: SearchFiltersDto) {
+		return this.hotelsService.searchAvailableHotels(filters);
+	}
+
+	/**
+	 * Get cities that have verified & listed hotels
+	 * GET /hotels/available-cities
+	 */
+	@Get('available-cities')
+	async getAvailableCities() {
+		return this.hotelsService.getAvailableCities();
+	}
+
+	/**
+	 * Get manager's hotels (Hotel Manager only)
+	 * GET /hotels/manager/hotels
+	 */
+	@Get('manager/hotels')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.hotel_manager)
+	async getManagerHotels(@CurrentUser() user: any) {
+		const managerId = await this.getManagerId(user);
+		return this.hotelsService.getManagerHotels(managerId);
+	}
+
+	/**
+	 * Search hotels with filters (legacy)
 	 * GET /hotels?city_id=40&minPrice=5000&maxPrice=15000&amenities=wifi,pool&starRating=4,5
 	 */
 	@Get()
 	async findAll(@Query() query: any) {
 		return this.hotelsService.findAll(query);
+	}
+
+	/**
+	 * Get regions that have verified hotels in a specific city
+	 * GET /hotels/regions/:city
+	 */
+	@Get('regions/:city')
+	async getRegionsByCity(@Param('city') city: string) {
+		return this.hotelsService.getRegionsByCity(city);
+	}
+
+	/**
+	 * Get reviews for a hotel (public)
+	 * GET /hotels/:id/reviews?page=1&limit=10
+	 */
+	@Get(':id/reviews')
+	async getHotelReviews(
+		@Param('id', ParseIntPipe) hotelId: number,
+		@Query('page') page: string = '1',
+		@Query('limit') limit: string = '10',
+	) {
+		return this.hotelsService.getHotelReviews(hotelId, Number(page), Number(limit));
+	}
+
+	/**
+	 * Check if user can review a hotel
+	 * GET /hotels/:id/can-review
+	 */
+	@Get(':id/can-review')
+	@UseGuards(JwtAuthGuard)
+	async canUserReview(
+		@Param('id', ParseIntPipe) hotelId: number,
+		@CurrentUser() user: any,
+	) {
+		return this.hotelsService.canUserReview(user.id, hotelId);
+	}
+
+	/**
+	 * Create a review for a hotel (Client only, must have completed booking)
+	 * POST /hotels/:id/reviews
+	 */
+	@Post(':id/reviews')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.client)
+	async createReview(
+		@Param('id', ParseIntPipe) hotelId: number,
+		@CurrentUser() user: any,
+		@Body() dto: CreateReviewDto,
+	) {
+		return this.hotelsService.createReview(user.id, hotelId, dto);
 	}
 
 	/**
@@ -326,15 +426,16 @@ export class HotelsController {
 	}
 
 	/**
-	 * Get manager's hotels (Hotel Manager only)
-	 * GET /hotels/manager/hotels
+	 * Check real-time room availability for a hotel (public)
+	 * GET /hotels/:id/room-availability?checkin=2025-03-01&checkout=2025-03-05
 	 */
-	@Get('manager/hotels')
-	@UseGuards(JwtAuthGuard, RolesGuard)
-	@Roles(Role.hotel_manager)
-	async getManagerHotels(@CurrentUser() user: any) {
-		const managerId = await this.getManagerId(user);
-		return this.hotelsService.getManagerHotels(managerId);
+	@Get(':id/room-availability')
+	async checkRoomAvailability(
+		@Param('id', ParseIntPipe) hotelId: number,
+		@Query('checkin') checkin: string,
+		@Query('checkout') checkout: string,
+	) {
+		return this.hotelsService.checkRoomAvailability(hotelId, checkin, checkout);
 	}
 
 	/**
@@ -367,11 +468,6 @@ export class HotelsController {
 	) {
 		const managerId = await this.getManagerId(user);
 		return this.hotelsService.getHotelAvailability(hotelId, managerId);
-	}
-
-	@Get('health')
-	health() {
-		return { ok: true, service: 'hotels' };
 	}
 }
 

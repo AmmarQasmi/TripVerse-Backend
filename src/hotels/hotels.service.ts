@@ -2,6 +2,8 @@ import { Injectable, NotFoundException, BadRequestException, ForbiddenException,
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
+import { SearchFiltersDto } from './dto/search-filters.dto';
+import { CreateReviewDto } from './dto/create-review.dto';
 
 @Injectable()
 export class HotelsService {
@@ -76,7 +78,7 @@ export class HotelsService {
 						take: 1, // Primary image only
 					},
 					roomTypes: {
-						where: { is_active: true },
+						where: { is_active: true, total_rooms: { gt: 0 } },
 						orderBy: { base_price: 'asc' },
 					},
 				},
@@ -90,7 +92,7 @@ export class HotelsService {
 			this.prisma.hotel.count({ where }),
 		]);
 
-		// Filter by price (from room types)
+		// Filter by price (from room types) — skip hotels with no available room types
 		const filteredHotels = hotels.filter((hotel) => {
 			if (hotel.roomTypes.length === 0) return false;
 			const minRoomPrice = Math.min(
@@ -139,6 +141,286 @@ export class HotelsService {
 				total: finalHotels.length,
 				totalPages: Math.ceil(finalHotels.length / limit),
 			},
+		};
+	}
+
+	/**
+	 * Search hotels with real-time room availability
+	 * Checks overlapping bookings to return accurate availability
+	 */
+	async searchAvailableHotels(filters: SearchFiltersDto) {
+		const { city, region, checkin, checkout, guests = 1, rooms = 1, minPrice, maxPrice, amenities, starRating } = filters;
+
+		// Build WHERE clause
+		const where: any = {
+			is_active: true,
+			is_listed: true,
+			manager: {
+				is_verified: true,
+			},
+		};
+
+		// Filter by city name (case-insensitive contains)
+		if (city) {
+			where.city = {
+				name: { contains: city, mode: 'insensitive' },
+			};
+		}
+
+		// Filter by region
+		if (region) {
+			where.city = {
+				...where.city,
+				region: { contains: region, mode: 'insensitive' },
+			};
+		}
+
+		// Filter by star rating
+		if (starRating) {
+			const ratings = starRating.split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n));
+			if (ratings.length > 0) {
+				where.star_rating = { in: ratings };
+			}
+		}
+
+		// Fetch hotels with room types
+		const hotels = await this.prisma.hotel.findMany({
+			where,
+			include: {
+				city: { select: { id: true, name: true, region: true } },
+				manager: { select: { id: true, is_verified: true } },
+				images: {
+					orderBy: { display_order: 'asc' },
+				},
+				roomTypes: {
+					where: { is_active: true, total_rooms: { gt: 0 } },
+					orderBy: { base_price: 'asc' },
+				},
+			},
+			orderBy: [
+				{ star_rating: 'desc' },
+				{ created_at: 'desc' },
+			],
+		});
+
+		// For each hotel, calculate real-time availability
+		const results = [];
+
+		for (const hotel of hotels) {
+			if (hotel.roomTypes.length === 0) continue;
+
+			// Calculate availability per room type
+			const roomTypesWithAvailability = [];
+
+			for (const roomType of hotel.roomTypes) {
+				// Skip room types with no rooms at all
+				if (roomType.total_rooms <= 0) continue;
+
+				let availableRooms = roomType.total_rooms;
+
+				// If dates provided, check overlapping bookings
+				if (checkin && checkout) {
+					const checkinDate = new Date(checkin);
+					const checkoutDate = new Date(checkout);
+
+					const overlappingBookings = await this.prisma.hotelBooking.aggregate({
+						where: {
+							room_type_id: roomType.id,
+							status: { in: ['CONFIRMED', 'PENDING_PAYMENT', 'CHECKED_IN'] },
+							check_in: { lt: checkoutDate },
+							check_out: { gt: checkinDate },
+						},
+						_sum: {
+							quantity: true,
+						},
+					});
+
+					const bookedRooms = overlappingBookings._sum.quantity || 0;
+					availableRooms = Math.max(0, roomType.total_rooms - bookedRooms);
+				}
+
+				// Filter by guest capacity
+				if (roomType.max_occupancy < guests) continue;
+
+				// Filter by room availability
+				if (availableRooms < rooms) continue;
+
+				roomTypesWithAvailability.push({
+					id: roomType.id.toString(),
+					name: roomType.name,
+					description: roomType.description,
+					pricePerNight: parseFloat(roomType.base_price.toString()),
+					capacity: roomType.max_occupancy,
+					totalRooms: roomType.total_rooms,
+					availableRooms,
+					amenities: (roomType.amenities as string[]) || [],
+					images: (roomType.images as string[]) || [],
+				});
+			}
+
+			// Skip hotel if no room types match criteria
+			if (roomTypesWithAvailability.length === 0) continue;
+
+			// Price filtering
+			const lowestPrice = Math.min(...roomTypesWithAvailability.map(rt => rt.pricePerNight));
+			if (minPrice !== undefined && lowestPrice < minPrice) continue;
+			if (maxPrice !== undefined && lowestPrice > maxPrice) continue;
+
+			// Amenity filtering
+			if (amenities) {
+				const requiredAmenities = amenities.split(',').map((a: string) => a.trim().toLowerCase());
+				const hotelAmenities = ((hotel.amenities as string[]) || []).map(a => a.toLowerCase());
+				const hasAll = requiredAmenities.every(a => hotelAmenities.includes(a));
+				if (!hasAll) continue;
+			}
+
+			results.push({
+				id: hotel.id.toString(),
+				name: hotel.name,
+				description: hotel.description,
+				location: hotel.city.name,
+				region: hotel.city.region,
+				address: hotel.address,
+				rating: hotel.star_rating,
+				pricePerNight: lowestPrice,
+				images: hotel.images.map(img => img.image_url),
+				amenities: (hotel.amenities as string[]) || [],
+				roomTypes: roomTypesWithAvailability,
+				createdAt: hotel.created_at.toISOString(),
+				updatedAt: hotel.updated_at.toISOString(),
+			});
+		}
+
+		return {
+			data: results,
+			total: results.length,
+			filters: {
+				city: city || null,
+				region: region || null,
+				checkin: checkin || null,
+				checkout: checkout || null,
+				guests,
+				rooms,
+			},
+		};
+	}
+
+	/**
+	 * Get list of cities that have verified & listed hotels
+	 */
+	async getAvailableCities() {
+		const cities = await this.prisma.hotel.groupBy({
+			by: ['city_id'],
+			where: {
+				is_active: true,
+				is_listed: true,
+				manager: {
+					is_verified: true,
+				},
+			},
+			_count: {
+				id: true,
+			},
+		});
+
+		// Fetch city details
+		const cityIds = cities.map(c => c.city_id);
+		const cityDetails = await this.prisma.city.findMany({
+			where: { id: { in: cityIds } },
+			select: { id: true, name: true, region: true },
+			orderBy: { name: 'asc' },
+		});
+
+		return cityDetails.map(city => {
+			const count = cities.find(c => c.city_id === city.id);
+			return {
+				id: city.id,
+				city: city.name,
+				region: city.region,
+				hotel_count: count?._count.id || 0,
+			};
+		}).sort((a, b) => a.city.localeCompare(b.city));
+	}
+
+	/**
+	 * Check real-time room availability for a specific hotel
+	 */
+	async checkRoomAvailability(hotelId: number, checkin: string, checkout: string) {
+		if (!checkin || !checkout) {
+			throw new BadRequestException('Both checkin and checkout dates are required');
+		}
+
+		const checkinDate = new Date(checkin);
+		const checkoutDate = new Date(checkout);
+
+		if (checkinDate >= checkoutDate) {
+			throw new BadRequestException('Checkout date must be after checkin date');
+		}
+
+		const hotel = await this.prisma.hotel.findUnique({
+			where: { id: hotelId },
+			include: {
+				city: { select: { name: true, region: true } },
+				roomTypes: {
+					where: { is_active: true },
+					orderBy: { base_price: 'asc' },
+				},
+			},
+		});
+
+		if (!hotel) {
+			throw new NotFoundException('Hotel not found');
+		}
+
+		// Calculate availability for each room type
+		const roomAvailability = await Promise.all(
+			hotel.roomTypes.map(async (roomType) => {
+				const overlappingBookings = await this.prisma.hotelBooking.aggregate({
+					where: {
+						room_type_id: roomType.id,
+						status: { in: ['CONFIRMED', 'PENDING_PAYMENT', 'CHECKED_IN'] },
+						check_in: { lt: checkoutDate },
+						check_out: { gt: checkinDate },
+					},
+					_sum: {
+						quantity: true,
+					},
+				});
+
+				const bookedRooms = overlappingBookings._sum.quantity || 0;
+				const availableRooms = Math.max(0, roomType.total_rooms - bookedRooms);
+
+				// Calculate total nights and price
+				const nights = Math.ceil((checkoutDate.getTime() - checkinDate.getTime()) / (1000 * 60 * 60 * 24));
+				const totalPrice = parseFloat(roomType.base_price.toString()) * nights;
+
+				return {
+					id: roomType.id.toString(),
+					name: roomType.name,
+					description: roomType.description,
+					capacity: roomType.max_occupancy,
+					pricePerNight: parseFloat(roomType.base_price.toString()),
+					totalPrice,
+					nights,
+					totalRooms: roomType.total_rooms,
+					bookedRooms,
+					availableRooms,
+					isAvailable: availableRooms > 0,
+					amenities: (roomType.amenities as string[]) || [],
+					images: (roomType.images as string[]) || [],
+				};
+			})
+		);
+
+		return {
+			hotelId: hotel.id.toString(),
+			hotelName: hotel.name,
+			location: hotel.city.name,
+			region: hotel.city.region,
+			checkin,
+			checkout,
+			roomTypes: roomAvailability,
+			hasAvailability: roomAvailability.some(r => r.isAvailable),
 		};
 	}
 
@@ -1009,6 +1291,304 @@ export class HotelsService {
 			is_listed: hotel.is_listed,
 			room_availability: availability,
 		};
+	}
+
+	// =====================
+	// Regions
+	// =====================
+
+	/**
+	 * Get regions that have verified hotels in a specific city
+	 */
+	async getRegionsByCity(cityName: string) {
+		// Find the city
+		const city = await this.prisma.city.findFirst({
+			where: { name: { contains: cityName, mode: 'insensitive' } },
+		});
+
+		if (!city) {
+			return [];
+		}
+
+		// Get hotels grouped by region in that city
+		const hotels = await this.prisma.hotel.findMany({
+			where: {
+				city_id: city.id,
+				is_active: true,
+				is_listed: true,
+				manager: { is_verified: true },
+			},
+			include: {
+				city: { select: { region: true } },
+			},
+		});
+
+		// Group by region
+		const regionMap = new Map<string, number>();
+		for (const hotel of hotels) {
+			const region = hotel.city.region;
+			regionMap.set(region, (regionMap.get(region) || 0) + 1);
+		}
+
+		return Array.from(regionMap.entries()).map(([region, count]) => ({
+			region,
+			hotel_count: count,
+		})).sort((a, b) => a.region.localeCompare(b.region));
+	}
+
+	// =====================
+	// Reviews
+	// =====================
+
+	/**
+	 * Get reviews for a hotel with pagination
+	 */
+	async getHotelReviews(hotelId: number, page: number = 1, limit: number = 10) {
+		const skip = (page - 1) * limit;
+
+		const [reviews, total] = await Promise.all([
+			this.prisma.hotelReview.findMany({
+				where: { hotel_id: hotelId },
+				include: {
+					user: {
+						select: {
+							id: true,
+							full_name: true,
+							client: true,
+						},
+					},
+				},
+				orderBy: { created_at: 'desc' },
+				skip,
+				take: limit,
+			}),
+			this.prisma.hotelReview.count({ where: { hotel_id: hotelId } }),
+		]);
+
+		// Check if each review is from a verified booking
+		const reviewsWithVerification = await Promise.all(
+			reviews.map(async (review) => {
+				const hasBooking = await this.prisma.hotelBooking.findFirst({
+					where: {
+						user_id: review.user_id,
+						hotel_id: hotelId,
+						status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
+					},
+				});
+
+				return {
+					id: review.id,
+					rating: review.rating,
+					comment: review.comment,
+					created_at: review.created_at.toISOString(),
+					user: {
+						id: review.user.id,
+						name: review.user.full_name,
+					},
+					verified_stay: !!hasBooking,
+				};
+			})
+		);
+
+		// Calculate average rating
+		const avgRating = await this.prisma.hotelReview.aggregate({
+			where: { hotel_id: hotelId },
+			_avg: { rating: true },
+		});
+
+		return {
+			reviews: reviewsWithVerification,
+			avg_rating: avgRating._avg.rating || 0,
+			total,
+			pagination: {
+				page,
+				limit,
+				total,
+				pages: Math.ceil(total / limit),
+			},
+		};
+	}
+
+	/**
+	 * Create a review for a hotel
+	 */
+	async createReview(userId: number, hotelId: number, dto: CreateReviewDto) {
+		// Check if hotel exists
+		const hotel = await this.prisma.hotel.findUnique({
+			where: { id: hotelId },
+			include: { manager: { include: { user: true } } },
+		});
+
+		if (!hotel) {
+			throw new NotFoundException('Hotel not found');
+		}
+
+		// Check if user has a completed/confirmed booking
+		const completedBooking = await this.prisma.hotelBooking.findFirst({
+			where: {
+				user_id: userId,
+				hotel_id: hotelId,
+				status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
+			},
+		});
+
+		if (!completedBooking) {
+			throw new BadRequestException('You can only review hotels after completing a booking');
+		}
+
+		// Check if user already reviewed
+		const existingReview = await this.prisma.hotelReview.findFirst({
+			where: {
+				user_id: userId,
+				hotel_id: hotelId,
+			},
+		});
+
+		if (existingReview) {
+			throw new BadRequestException('You have already reviewed this hotel');
+		}
+
+		// Create review
+		const review = await this.prisma.hotelReview.create({
+			data: {
+				user_id: userId,
+				hotel_id: hotelId,
+				rating: dto.rating,
+				comment: dto.comment,
+			},
+			include: {
+				user: {
+					select: {
+						id: true,
+						full_name: true,
+					},
+				},
+			},
+		});
+
+		// Send notification to hotel manager
+		if (hotel.manager?.user_id) {
+			try {
+				await this.notificationsService.createNotification(
+					hotel.manager.user_id,
+					'hotel_review_received',
+					'New Review Received',
+					`Your hotel "${hotel.name}" received a ${dto.rating}-star review`,
+					{ hotel_id: hotelId, review_id: review.id },
+				);
+			} catch (error) {
+				// Don't fail the review creation if notification fails
+			}
+		}
+
+		return {
+			id: review.id,
+			rating: review.rating,
+			comment: review.comment,
+			created_at: review.created_at.toISOString(),
+			user: {
+				id: review.user.id,
+				name: review.user.full_name,
+			},
+			verified_stay: true,
+		};
+	}
+
+	/**
+	 * Check if a user can review a specific hotel
+	 */
+	async canUserReview(userId: number, hotelId: number) {
+		const completedBooking = await this.prisma.hotelBooking.findFirst({
+			where: {
+				user_id: userId,
+				hotel_id: hotelId,
+				status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
+			},
+		});
+
+		if (!completedBooking) {
+			return { can_review: false, reason: 'No completed booking' };
+		}
+
+		const existingReview = await this.prisma.hotelReview.findFirst({
+			where: {
+				user_id: userId,
+				hotel_id: hotelId,
+			},
+		});
+
+		if (existingReview) {
+			return { can_review: false, reason: 'Already reviewed' };
+		}
+
+		return { can_review: true };
+	}
+
+	/**
+	 * Get popular destinations with booking stats
+	 */
+	async getPopularDestinations() {
+		// Get cities that have verified, active, listed hotels with a verified manager
+		const cities = await this.prisma.city.findMany({
+			where: {
+				hotels: {
+					some: {
+						is_active: true,
+						is_listed: true,
+						manager: { is_verified: true },
+					},
+				},
+			},
+			include: {
+				_count: {
+					select: {
+						hotels: {
+							where: { is_active: true, is_listed: true },
+						},
+					},
+				},
+			},
+		});
+
+		const destinations = await Promise.all(
+			cities.map(async (city) => {
+				// Get starting price from room types
+				const priceStats = await this.prisma.hotelRoomType.aggregate({
+					where: {
+						hotel: {
+							city_id: city.id,
+							is_active: true,
+							is_listed: true,
+						},
+						is_active: true,
+					},
+					_min: { base_price: true },
+					_avg: { base_price: true },
+				});
+
+				// Count confirmed bookings
+				const bookingCount = await this.prisma.hotelBooking.count({
+					where: {
+						hotel: { city_id: city.id },
+						status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
+					},
+				});
+
+				return {
+					city: city.name,
+					region: city.region,
+					hotel_count: city._count.hotels,
+					starting_price: Number(priceStats._min.base_price) || 0,
+					avg_price: Math.round(Number(priceStats._avg.base_price) || 0),
+					total_bookings: bookingCount,
+				};
+			}),
+		);
+
+		// Sort by bookings desc, then hotel_count desc, take top 8
+		return destinations
+			.sort((a, b) => b.total_bookings - a.total_bookings || b.hotel_count - a.hotel_count)
+			.slice(0, 8);
 	}
 }
 
