@@ -1,7 +1,8 @@
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
-import { HotelBookingStatus } from '@prisma/client';
+import { HotelBookingStatus, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { CreateBookingWithPaymentDto } from './dto/create-booking-with-payment.dto';
 
 @Injectable()
 export class BookingsService {
@@ -270,6 +271,233 @@ export class BookingsService {
 				guest_notes: guest_notes || null,
 			},
 			created_at: bookingWithRelations.created_at.toISOString(),
+		};
+	}
+
+	/**
+	 * Create booking with immediate payment (3-step modal flow)
+	 * Combines availability check + booking creation + simulated payment in one transaction
+	 */
+	async createBookingWithPayment(userId: number, dto: CreateBookingWithPaymentDto) {
+		const { hotel_id, room_type_id, quantity, check_in, check_out, guest_name, guest_email, guest_phone, special_requests, payment_method } = dto;
+
+		// Validate dates
+		const checkInDate = new Date(check_in + 'T00:00:00.000Z');
+		const checkOutDate = new Date(check_out + 'T00:00:00.000Z');
+		const today = new Date();
+		today.setHours(0, 0, 0, 0);
+
+		if (checkInDate < today) {
+			throw new BadRequestException('Check-in date cannot be in the past');
+		}
+		if (checkOutDate <= checkInDate) {
+			throw new BadRequestException('Check-out date must be after check-in date');
+		}
+		if (quantity < 1 || quantity > 10) {
+			throw new BadRequestException('Quantity must be between 1 and 10 rooms');
+		}
+
+		// Full transactional flow: check availability → create booking → create payment
+		const result = await this.prisma.$transaction(async (tx) => {
+			// 1. Validate hotel and room type
+			const hotel = await tx.hotel.findUnique({
+				where: { id: hotel_id },
+				include: {
+					city: { select: { id: true, name: true } },
+					manager: {
+						include: {
+							user: { select: { id: true, full_name: true } },
+						},
+					},
+					roomTypes: {
+						where: { id: room_type_id, is_active: true },
+					},
+				},
+			});
+
+			if (!hotel || !hotel.is_active) {
+				throw new NotFoundException('Hotel not found or inactive');
+			}
+			if (!hotel.manager || !hotel.manager.is_verified) {
+				throw new BadRequestException('Hotel manager is not verified');
+			}
+			if (!hotel.is_listed) {
+				throw new BadRequestException('Hotel is not currently listed');
+			}
+			if (hotel.roomTypes.length === 0) {
+				throw new NotFoundException('Room type not found or inactive');
+			}
+
+			const roomType = hotel.roomTypes[0];
+
+			// 2. Check availability (same overlap logic as existing method)
+			const now = new Date();
+			const conflictingBookings = await tx.hotelBooking.findMany({
+				where: {
+					hotel_id,
+					room_type_id,
+					AND: [
+						{
+							OR: [
+								{
+									AND: [
+										{ check_in: { lte: checkOutDate } },
+										{ check_out: { gte: checkInDate } },
+									],
+								},
+							],
+						},
+						{
+							OR: [
+								{ status: HotelBookingStatus.CONFIRMED },
+								{
+									status: HotelBookingStatus.PENDING_PAYMENT,
+									OR: [
+										{ expires_at: null },
+										{ expires_at: { gt: now } },
+									],
+								},
+							],
+						},
+					],
+				},
+			});
+
+			const totalBookedRooms = conflictingBookings.reduce((sum, b) => sum + b.quantity, 0);
+			const availableRooms = roomType.total_rooms - totalBookedRooms;
+
+			if (availableRooms < quantity) {
+				throw new BadRequestException(
+					`Not enough rooms available. Available: ${availableRooms}, Requested: ${quantity}`,
+				);
+			}
+
+			// 3. Calculate pricing with tax & service fee
+			const nights = Math.ceil((checkOutDate.getTime() - checkInDate.getTime()) / (1000 * 60 * 60 * 24));
+			const basePricePerNight = parseFloat(roomType.base_price.toString());
+			const subtotal = basePricePerNight * quantity * nights;
+			const taxRate = 0.15; // 15% tax
+			const serviceFeeRate = 0.05; // 5% service fee
+			const taxAmount = Math.round(subtotal * taxRate * 100) / 100;
+			const serviceFee = Math.round(subtotal * serviceFeeRate * 100) / 100;
+			const totalAmount = Math.round((subtotal + taxAmount + serviceFee) * 100) / 100;
+
+			// 4. Create booking directly as CONFIRMED (payment is simulated)
+			const newBooking = await tx.hotelBooking.create({
+				data: {
+					user_id: userId,
+					hotel_id,
+					room_type_id,
+					quantity,
+					check_in: checkInDate,
+					check_out: checkOutDate,
+					status: HotelBookingStatus.CONFIRMED,
+					total_amount: totalAmount,
+					currency: 'pkr',
+					expires_at: null, // No expiry — directly confirmed
+				},
+			});
+
+			// 5. Create payment transaction record
+			const paymentTransaction = await tx.paymentTransaction.create({
+				data: {
+					booking_hotel_id: newBooking.id,
+					user_id: userId,
+					amount: totalAmount,
+					currency: 'pkr',
+					application_fee_amount: serviceFee,
+					status: PaymentStatus.completed,
+				},
+			});
+
+			return {
+				booking: newBooking,
+				payment: paymentTransaction,
+				hotel,
+				roomType,
+				nights,
+				basePricePerNight,
+				subtotal,
+				taxAmount,
+				serviceFee,
+				totalAmount,
+			};
+		});
+
+		// Notify hotel manager
+		try {
+			if (result.hotel?.manager?.user?.id) {
+				const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { full_name: true } });
+				await this.notificationsService.createNotification(
+					result.hotel.manager.user.id,
+					'hotel_booking_confirmed',
+					'New Confirmed Booking',
+					`${user?.full_name || 'A guest'} has booked ${result.booking.quantity} ${result.roomType.name} room(s) at ${result.hotel.name} (${result.booking.check_in.toISOString().split('T')[0]} to ${result.booking.check_out.toISOString().split('T')[0]})`,
+					{
+						booking_id: result.booking.id,
+						hotel_id: result.hotel.id,
+					},
+				);
+			}
+		} catch (error) {
+			console.error('Failed to notify hotel manager about booking:', error);
+		}
+
+		// Notify user
+		try {
+			await this.notificationsService.notifyBookingConfirmed(userId, result.booking.id, 'hotel');
+		} catch (error) {
+			console.error('Failed to notify user about booking confirmation:', error);
+		}
+
+		return {
+			success: true,
+			message: 'Booking confirmed successfully!',
+			booking: {
+				id: result.booking.id,
+				status: result.booking.status,
+				hotel: {
+					id: result.hotel.id,
+					name: result.hotel.name,
+					address: result.hotel.address,
+					city: result.hotel.city.name,
+				},
+				room_type: {
+					id: result.roomType.id,
+					name: result.roomType.name,
+					max_occupancy: result.roomType.max_occupancy,
+					price_per_night: result.basePricePerNight,
+				},
+				dates: {
+					check_in: check_in,
+					check_out: check_out,
+					nights: result.nights,
+				},
+				guest_info: {
+					name: guest_name || null,
+					email: guest_email || null,
+					phone: guest_phone || null,
+					special_requests: special_requests || null,
+				},
+				pricing: {
+					base_price_per_night: result.basePricePerNight,
+					quantity,
+					nights: result.nights,
+					subtotal: result.subtotal,
+					tax_amount: result.taxAmount,
+					tax_rate: 0.15,
+					service_fee: result.serviceFee,
+					service_fee_rate: 0.05,
+					total_amount: result.totalAmount,
+					currency: 'pkr',
+				},
+				payment: {
+					id: result.payment.id,
+					status: result.payment.status,
+					method: payment_method || 'card',
+				},
+			},
+			created_at: result.booking.created_at.toISOString(),
 		};
 	}
 

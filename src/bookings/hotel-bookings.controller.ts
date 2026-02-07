@@ -16,6 +16,7 @@ import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '@prisma/client';
+import { CreateBookingWithPaymentDto } from './dto/create-booking-with-payment.dto';
 
 @Controller('hotel-bookings')
 export class HotelBookingsController {
@@ -37,6 +38,21 @@ export class HotelBookingsController {
 			...body,
 			user_id: userId,
 		});
+	}
+
+	/**
+	 * Create booking with immediate payment (3-step modal flow)
+	 * POST /hotel-bookings/create-with-payment
+	 */
+	@Post('create-with-payment')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.client)
+	async createBookingWithPayment(
+		@Request() req: any,
+		@Body() body: CreateBookingWithPaymentDto,
+	) {
+		const userId = req.user.id;
+		return this.bookingsService.createBookingWithPayment(userId, body);
 	}
 
 	/**

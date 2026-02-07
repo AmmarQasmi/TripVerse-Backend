@@ -126,6 +126,7 @@ enum NotificationType {
   hotel_booking_created
   hotel_booking_confirmed
   hotel_booking_payment_received
+  hotel_review_received
   chat_message
 }
 
@@ -173,6 +174,7 @@ model User {
   admin                         Admin?
   hotelManager                  HotelManager?
   hotelBookings                 HotelBooking[]         @relation("UserHotelBookings")
+  hotelReviews                  HotelReview[]
   carBookings                   CarBooking[]           @relation("UserCarBookings")
   payments                      PaymentTransaction[]
   notifications                 Notification[]
@@ -315,6 +317,7 @@ model Hotel {
   images        HotelImage[]
   roomTypes     HotelRoomType[]
   hotelBookings HotelBooking[]
+  hotelReviews  HotelReview[]
 
   @@index([city_id, star_rating])
   @@index([is_active])
@@ -361,6 +364,24 @@ model HotelRoomType {
   @@index([hotel_id, name])
   @@index([base_price])
   @@map("hotel_room_types")
+}
+
+model HotelReview {
+  id         Int      @id @default(autoincrement())
+  user_id    Int
+  hotel_id   Int
+  rating     Int      // 1-5
+  comment    String?  @db.Text
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  user  User  @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  hotel Hotel @relation(fields: [hotel_id], references: [id], onDelete: Cascade)
+
+  @@unique([user_id, hotel_id]) // One review per user per hotel
+  @@index([hotel_id, created_at])
+  @@index([user_id])
+  @@map("hotel_reviews")
 }
 
 model Car {
@@ -437,6 +458,8 @@ model HotelBooking {
   @@index([user_id, created_at])
   @@index([status])
   @@index([hotel_id, check_in])
+  @@index([room_type_id])
+  @@index([room_type_id, status, check_in, check_out])
   @@index([expires_at]) // Index for cleanup job to find expired bookings
 }
 
