@@ -1108,6 +1108,88 @@ export class BookingsService {
 			})),
 		};
 	}
+
+	/**
+	 * Get unavailable dates for a specific room type at a hotel.
+	 * A date is "unavailable" when ALL rooms of that type are booked.
+	 * Scans 6 months ahead from today.
+	 */
+	async getRoomUnavailableDates(hotelId: number, roomTypeId: number) {
+		// Validate hotel and room type
+		const roomType = await this.prisma.hotelRoomType.findFirst({
+			where: { id: roomTypeId, hotel_id: hotelId, is_active: true },
+		});
+		if (!roomType) {
+			throw new NotFoundException('Room type not found or inactive');
+		}
+
+		const today = new Date();
+		today.setHours(0, 0, 0, 0);
+
+		// Scan 6 months ahead
+		const scanEnd = new Date(today);
+		scanEnd.setMonth(scanEnd.getMonth() + 6);
+
+		// Get all active bookings for this room type that overlap with our scan window
+		const now = new Date();
+		const activeBookings = await this.prisma.hotelBooking.findMany({
+			where: {
+				hotel_id: hotelId,
+				room_type_id: roomTypeId,
+				check_out: { gte: today },
+				check_in: { lte: scanEnd },
+				OR: [
+					{ status: HotelBookingStatus.CONFIRMED },
+					{ status: HotelBookingStatus.CHECKED_IN },
+					{
+						status: HotelBookingStatus.PENDING_PAYMENT,
+						OR: [
+							{ expires_at: null },
+							{ expires_at: { gt: now } },
+						],
+					},
+				],
+			},
+			select: {
+				check_in: true,
+				check_out: true,
+				quantity: true,
+			},
+		});
+
+		// For each date in the scan window, count total booked rooms
+		const unavailableDates: string[] = [];
+		const current = new Date(today);
+
+		while (current <= scanEnd) {
+			const dateStr = current.toISOString().split('T')[0];
+			const currentDate = new Date(current);
+
+			// Count rooms booked on this specific date
+			let bookedRooms = 0;
+			for (const booking of activeBookings) {
+				const bookingCheckIn = new Date(booking.check_in);
+				const bookingCheckOut = new Date(booking.check_out);
+				// A guest occupies the room from check_in to check_out (exclusive of check_out day)
+				if (currentDate >= bookingCheckIn && currentDate < bookingCheckOut) {
+					bookedRooms += booking.quantity;
+				}
+			}
+
+			if (bookedRooms >= roomType.total_rooms) {
+				unavailableDates.push(dateStr);
+			}
+
+			current.setDate(current.getDate() + 1);
+		}
+
+		return {
+			hotel_id: hotelId,
+			room_type_id: roomTypeId,
+			total_rooms: roomType.total_rooms,
+			unavailable_dates: unavailableDates,
+		};
+	}
 }
 
 

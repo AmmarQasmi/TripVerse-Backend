@@ -515,7 +515,7 @@ export class DriversService {
 			}),
 			// Active cars count
 			this.prisma.car.count({
-				where: { driver_id: driver.id, is_active: true },
+				where: { driver_id: driver.id, is_active: true, is_listed: true },
 			}),
 			// Recent bookings (last 5)
 			this.prisma.carBooking.findMany({

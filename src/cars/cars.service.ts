@@ -1,13 +1,18 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Inject, forwardRef, Optional } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, ForbiddenException, Inject, forwardRef, Optional, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 import { AdminService } from '../admin/admin.service';
 import { GooglePlacesService } from '../common/services/google-places.service';
+import { WeatherService } from '../weather/weather.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ChatGateway } from './chat.gateway';
+import axios from 'axios';
 
 @Injectable()
 export class CarsService {
+	private readonly logger = new Logger(CarsService.name);
+
 	constructor(
 		@Inject(PrismaService) private prisma: PrismaService,
 		private cloudinaryService: CloudinaryService,
@@ -15,9 +20,19 @@ export class CarsService {
 		@Inject(forwardRef(() => AdminService))
 		private adminService: AdminService,
 		private googlePlacesService: GooglePlacesService,
+		private weatherService: WeatherService,
+		private configService: ConfigService,
 		@Optional() @Inject(forwardRef(() => ChatGateway))
 		private chatGateway?: ChatGateway,
 	) {}
+
+	/**
+	 * Autocomplete location suggestions using Google Places API
+	 */
+	async autocompleteLocation(input: string, country?: string) {
+		const suggestions = await this.googlePlacesService.autocomplete(input, country);
+		return { suggestions };
+	}
 
 	/**
 	 * Search available cars with filters
@@ -26,6 +41,7 @@ export class CarsService {
 	async searchCars(query: any = {}) {
 		const {
 			city_id,
+			location_query,
 			start_date,
 			end_date,
 			seats,
@@ -53,13 +69,32 @@ export class CarsService {
 			},
 		};
 
-		// Filter by city
+		// Filter by city ID (exact match)
 		if (city_id) {
 			where.driver = {
 				...where.driver,
 				user: {
 					...where.driver.user,
 					city_id: parseInt(city_id),
+				},
+			};
+		}
+		// Filter by location text query (from pickup location search)
+		else if (location_query) {
+			// Extract all parts from autocomplete text (e.g., "Mazar-e-Quaid, M.A. Jinnah Road, Karachi, Pakistan")
+			// Try matching any segment against city name or region
+			const parts = location_query.split(',').map((p: string) => p.trim()).filter((p: string) => p.length > 0);
+			const cityConditions = parts.flatMap((part: string) => [
+				{ name: { contains: part, mode: 'insensitive' } },
+				{ region: { contains: part, mode: 'insensitive' } },
+			]);
+			where.driver = {
+				...where.driver,
+				user: {
+					...where.driver.user,
+					city: {
+						OR: cityConditions,
+					},
 				},
 			};
 		}
@@ -284,6 +319,51 @@ export class CarsService {
 	}
 
 	/**
+	 * Get unavailable dates for a car based on active bookings
+	 */
+	async getUnavailableDates(carId: number) {
+		const car = await this.prisma.car.findUnique({ where: { id: carId } });
+		if (!car) throw new NotFoundException('Car not found');
+
+		const activeBookings = await this.prisma.carBooking.findMany({
+			where: {
+				car_id: carId,
+				status: {
+					in: ['PENDING_DRIVER_ACCEPTANCE', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS'],
+				},
+				end_date: { gte: new Date() },
+			},
+			select: {
+				start_date: true,
+				end_date: true,
+				status: true,
+			},
+			orderBy: { start_date: 'asc' },
+		});
+
+		// Expand each booking range into individual dates
+		const unavailableDates: string[] = [];
+		for (const booking of activeBookings) {
+			const current = new Date(booking.start_date);
+			const end = new Date(booking.end_date);
+			while (current <= end) {
+				unavailableDates.push(current.toISOString().split('T')[0]);
+				current.setDate(current.getDate() + 1);
+			}
+		}
+
+		return {
+			car_id: carId,
+			unavailable_dates: [...new Set(unavailableDates)].sort(),
+			booking_ranges: activeBookings.map(b => ({
+				start_date: b.start_date.toISOString().split('T')[0],
+				end_date: b.end_date.toISOString().split('T')[0],
+				status: b.status,
+			})),
+		};
+	}
+
+	/**
 	 * Calculate price for a specific car and route
 	 */
 	async calculatePrice(carId: number, pickupLocation: string, dropoffLocation: string, startDate: string, endDate: string, estimatedDistance?: number) {
@@ -458,6 +538,62 @@ export class CarsService {
 				},
 			},
 		};
+	}
+
+	/**
+	 * Cancel a booking (by the customer)
+	 * Only PENDING_DRIVER_ACCEPTANCE and ACCEPTED bookings can be cancelled
+	 */
+	async cancelBooking(bookingId: number, userId: number) {
+		const booking = await this.prisma.carBooking.findUnique({
+			where: { id: bookingId },
+			include: {
+				car: {
+					include: {
+						driver: {
+							include: {
+								user: {
+									select: { id: true, full_name: true },
+								},
+							},
+						},
+					},
+				},
+			},
+		});
+
+		if (!booking) {
+			throw new NotFoundException('Booking not found');
+		}
+
+		if (booking.user_id !== userId) {
+			throw new ForbiddenException('You can only cancel your own bookings');
+		}
+
+		if (!['PENDING_DRIVER_ACCEPTANCE', 'ACCEPTED'].includes(booking.status)) {
+			throw new BadRequestException(
+				'Only pending or accepted bookings can be cancelled',
+			);
+		}
+
+		const updated = await this.prisma.carBooking.update({
+			where: { id: bookingId },
+			data: { status: 'CANCELLED' },
+		});
+
+		// Notify driver about cancellation
+		try {
+			await this.notificationsService.createNotification(
+				booking.car.driver.user.id,
+				'booking_rejected' as any,
+				'Booking Cancelled',
+				`A customer has cancelled their booking #${bookingId}.`,
+			);
+		} catch (e) {
+			// Don't fail the cancellation if notification fails
+		}
+
+		return { message: 'Booking cancelled successfully', booking_id: updated.id };
 	}
 
 	/**
@@ -664,17 +800,34 @@ export class CarsService {
 				car: {
 					include: {
 						carModel: true,
+						images: {
+							take: 1,
+							orderBy: { display_order: 'asc' },
+						},
 						driver: {
 							include: {
 								user: {
-									select: {
-										id: true,
-										full_name: true,
+									include: {
+										city: {
+											select: {
+												id: true,
+												name: true,
+											},
+										},
 									},
 								},
 							},
 						},
 					},
+				},
+				payments: {
+					select: {
+						id: true,
+						status: true,
+						amount: true,
+					},
+					orderBy: { created_at: 'desc' },
+					take: 1,
 				},
 			},
 			orderBy: { created_at: 'desc' },
@@ -687,16 +840,48 @@ export class CarsService {
 				make: booking.car.carModel.make,
 				model: booking.car.carModel.model,
 				year: booking.car.year,
+				color: booking.car.color,
+				seats: booking.car.seats,
+				transmission: booking.car.transmission,
+				fuel_type: booking.car.fuel_type,
+				license_plate: booking.car.license_plate,
+				image: booking.car.images?.[0]?.image_url || null,
 			},
 			driver: {
+				id: booking.car.driver.user.id,
 				name: booking.car.driver.user.full_name,
+				email: booking.car.driver.user.email,
+				city: booking.car.driver.user.city?.name || null,
+				isVerified: booking.car.driver.is_verified,
 			},
 			pickup_location: booking.pickup_location,
 			dropoff_location: booking.dropoff_location,
+			estimated_distance: booking.estimated_distance
+				? parseFloat(booking.estimated_distance.toString())
+				: null,
 			start_date: booking.start_date.toISOString().split('T')[0],
 			end_date: booking.end_date.toISOString().split('T')[0],
 			total_amount: parseFloat(booking.total_amount.toString()),
+			driver_earnings: parseFloat(booking.driver_earnings.toString()),
+			platform_fee: parseFloat(booking.platform_fee.toString()),
+			currency: booking.currency,
+			customer_notes: booking.customer_notes,
+			driver_notes: booking.driver_notes,
+			// Timestamps
+			requested_at: booking.requested_at?.toISOString() || null,
+			accepted_at: booking.accepted_at?.toISOString() || null,
+			confirmed_at: booking.confirmed_at?.toISOString() || null,
+			started_at: booking.started_at?.toISOString() || null,
+			completed_at: booking.completed_at?.toISOString() || null,
 			created_at: booking.created_at.toISOString(),
+			// Payment
+			payment: booking.payments?.[0]
+				? {
+						id: booking.payments[0].id,
+						status: booking.payments[0].status,
+						amount: parseFloat(booking.payments[0].amount.toString()),
+					}
+				: null,
 		}));
 	}
 
@@ -1210,6 +1395,7 @@ export class CarsService {
 				},
 				images: car.images.map((img) => img.image_url),
 				is_active: car.is_active,
+				is_listed: car.is_listed,
 				booking_stats: {
 					total_bookings: totalBookings,
 					active_bookings: activeBookings,
@@ -1840,5 +2026,168 @@ export class CarsService {
 			is_listed: updated.is_listed,
 			message: 'Car availability updated successfully',
 		};
+	}
+
+	// =====================
+	// CITY EXPLORER
+	// =====================
+
+	/**
+	 * Get popular cities with most available verified drivers
+	 */
+	async getPopularCities() {
+		const driversWithCities = await this.prisma.driver.findMany({
+			where: {
+				is_verified: true,
+				user: { status: 'active' },
+			},
+			select: {
+				user: {
+					select: {
+						city: {
+							select: { name: true, region: true },
+						},
+					},
+				},
+			},
+		});
+
+		const cityMap = new Map<string, { city: string; region: string; available_drivers: number }>();
+		for (const driver of driversWithCities) {
+			const cityName = driver.user.city.name;
+			const region = driver.user.city.region;
+			if (!cityMap.has(cityName)) {
+				cityMap.set(cityName, { city: cityName, region, available_drivers: 0 });
+			}
+			cityMap.get(cityName)!.available_drivers++;
+		}
+
+		return Array.from(cityMap.values())
+			.sort((a, b) => b.available_drivers - a.available_drivers)
+			.slice(0, 8);
+	}
+
+	/**
+	 * Get city explorer data: weather, places, restaurants, wikipedia facts
+	 */
+	async getCityExplorerData(cityName: string) {
+		const [weatherResult, placesResult, wikiResult] = await Promise.allSettled([
+			this.getWeatherForCity(cityName),
+			this.getPlacesForCity(cityName),
+			this.getWikipediaData(cityName),
+		]);
+
+		const weather = weatherResult.status === 'fulfilled' ? weatherResult.value : null;
+		const places = placesResult.status === 'fulfilled' ? placesResult.value : { places: [], restaurants: [] };
+		const wiki = wikiResult.status === 'fulfilled' ? wikiResult.value : null;
+
+		return {
+			city: cityName,
+			weather,
+			places_to_visit: places.places,
+			restaurants: places.restaurants,
+			facts: wiki?.summary || '',
+			wiki_url: wiki?.url || '',
+			thumbnail: wiki?.thumbnail || null,
+			best_time_to_visit: weather ? this.getBestTimeToVisit(weather.temperature) : 'Check weather for recommendations',
+		};
+	}
+
+	private async getWeatherForCity(cityName: string) {
+		try {
+			return await this.weatherService.getCurrentWeather(cityName);
+		} catch (error) {
+			this.logger.warn(`Failed to get weather for ${cityName}: ${error}`);
+			return null;
+		}
+	}
+
+	private async getPlacesForCity(cityName: string) {
+		const apiKey = this.configService.get('GOOGLE_PLACES_API_KEY');
+		if (!apiKey) {
+			return { places: [], restaurants: [] };
+		}
+
+		try {
+			const [placesRes, restaurantsRes] = await Promise.allSettled([
+				axios.get('https://maps.googleapis.com/maps/api/place/textsearch/json', {
+					params: { query: `tourist attractions in ${cityName}`, key: apiKey },
+					timeout: 10000,
+				}),
+				axios.get('https://maps.googleapis.com/maps/api/place/textsearch/json', {
+					params: { query: `best restaurants in ${cityName}`, key: apiKey },
+					timeout: 10000,
+				}),
+			]);
+
+			const places = placesRes.status === 'fulfilled'
+				? placesRes.value.data.results.slice(0, 5).map((place: any) => ({
+						name: place.name,
+						address: place.formatted_address,
+						rating: place.rating || 0,
+						photo: place.photos?.[0]
+							? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
+							: null,
+					}))
+				: [];
+
+			const restaurants = restaurantsRes.status === 'fulfilled'
+				? restaurantsRes.value.data.results.slice(0, 5).map((place: any) => ({
+						name: place.name,
+						address: place.formatted_address,
+						rating: place.rating || 0,
+						photo: place.photos?.[0]
+							? `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${place.photos[0].photo_reference}&key=${apiKey}`
+							: null,
+					}))
+				: [];
+
+			return { places, restaurants };
+		} catch (error) {
+			this.logger.warn(`Failed to get places for ${cityName}: ${error}`);
+			return { places: [], restaurants: [] };
+		}
+	}
+
+	private async getWikipediaData(cityName: string) {
+		// Try multiple Wikipedia search strategies
+		const searchVariants = [
+			cityName,                        // e.g. "Sibi"
+			`${cityName}, Pakistan`,          // e.g. "Sibi, Pakistan"
+			`${cityName} (city)`,             // e.g. "Sibi (city)"
+		];
+
+		for (const variant of searchVariants) {
+			try {
+				const response = await axios.get(
+					`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(variant)}`,
+					{ timeout: 10000 },
+				);
+
+				// Skip disambiguation pages or empty extracts
+				if (response.data.type === 'disambiguation' || !response.data.extract) {
+					continue;
+				}
+
+				return {
+					summary: response.data.extract,
+					thumbnail: response.data.thumbnail?.source || null,
+					url: response.data.content_urls?.desktop?.page || '',
+				};
+			} catch {
+				// This variant failed (404 etc.), try next
+				continue;
+			}
+		}
+
+		this.logger.warn(`No Wikipedia data found for ${cityName} after trying all variants`);
+		return { summary: '', thumbnail: null, url: '' };
+	}
+
+	private getBestTimeToVisit(temperature: number): string {
+		if (temperature < 15) return 'Winter season — pack warm clothes';
+		if (temperature < 25) return 'Pleasant weather — ideal for exploring';
+		if (temperature < 35) return 'Warm weather — stay hydrated';
+		return 'Hot season — plan outdoor activities for mornings/evenings';
 	}
 }
