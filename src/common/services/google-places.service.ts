@@ -239,6 +239,53 @@ export class GooglePlacesService {
   }
 
   /**
+   * Autocomplete place suggestions using Google Places Autocomplete API
+   */
+  async autocomplete(input: string, country?: string): Promise<Array<{ place_id: string; description: string; structured_formatting: { main_text: string; secondary_text: string } }>> {
+    try {
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.logger.warn('Google Places API key not configured');
+        return [];
+      }
+
+      if (!input || input.trim().length < 2) {
+        return [];
+      }
+
+      const params: any = {
+        input: input.trim(),
+        key: this.apiKey,
+        types: 'geocode|establishment',
+      };
+
+      if (country) {
+        params.components = `country:${country}`;
+      }
+
+      const response = await axios.get(`${this.baseUrl}/autocomplete/json`, {
+        params,
+        timeout: 5000,
+      });
+
+      if (response.data?.status === 'OK' && response.data?.predictions) {
+        return response.data.predictions.map((prediction: any) => ({
+          place_id: prediction.place_id,
+          description: prediction.description,
+          structured_formatting: {
+            main_text: prediction.structured_formatting?.main_text || prediction.description,
+            secondary_text: prediction.structured_formatting?.secondary_text || '',
+          },
+        }));
+      }
+
+      return [];
+    } catch (error) {
+      this.logger.error('Error fetching autocomplete suggestions:', (error as Error).message);
+      return [];
+    }
+  }
+
+  /**
    * Calculate driving distance between two locations using Distance Matrix API
    * @param origin Origin location (e.g., "Karachi, Pakistan")
    * @param destination Destination location (e.g., "Lahore, Pakistan")

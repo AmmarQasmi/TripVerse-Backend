@@ -165,6 +165,18 @@ export class HotelBookingsController {
 		return this.bookingsService.getAllHotelBookingsForAdmin(query);
 	}
 
+	/**
+	 * Get unavailable dates for a specific room type
+	 * GET /hotel-bookings/room-unavailable-dates/:hotelId?room_type_id=X
+	 */
+	@Get('room-unavailable-dates/:hotelId')
+	async getRoomUnavailableDates(
+		@Param('hotelId', ParseIntPipe) hotelId: number,
+		@Query('room_type_id', ParseIntPipe) roomTypeId: number,
+	) {
+		return this.bookingsService.getRoomUnavailableDates(hotelId, roomTypeId);
+	}
+
 	@Get('health')
 	health() {
 		return { ok: true, service: 'hotel-bookings' };

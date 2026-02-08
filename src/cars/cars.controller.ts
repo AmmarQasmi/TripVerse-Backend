@@ -29,6 +29,18 @@ export class CarsController {
 	constructor(private readonly carsService: CarsService) {}
 
 	/**
+	 * Autocomplete location suggestions
+	 * GET /cars/places/autocomplete?input=karachi&country=pk
+	 */
+	@Get('places/autocomplete')
+	async autocompleteLocation(
+		@Query('input') input: string,
+		@Query('country') country?: string,
+	) {
+		return this.carsService.autocompleteLocation(input, country);
+	}
+
+	/**
 	 * Search available cars with filters
 	 * GET /cars/search?city_id=1&start_date=2024-02-15&end_date=2024-02-17&seats=4&transmission=automatic
 	 */
@@ -44,6 +56,24 @@ export class CarsController {
 	@Get('models')
 	async getCarModels() {
 		return this.carsService.getAllCarModels();
+	}
+
+	/**
+	 * Get popular cities with available drivers
+	 * GET /cars/cities/popular
+	 */
+	@Get('cities/popular')
+	async getPopularCities() {
+		return this.carsService.getPopularCities();
+	}
+
+	/**
+	 * Explore city info (weather, places, facts)
+	 * GET /cars/cities/explore/:cityName
+	 */
+	@Get('cities/explore/:cityName')
+	async exploreCityInfo(@Param('cityName') cityName: string) {
+		return this.carsService.getCityExplorerData(cityName);
 	}
 
 	/**
@@ -66,6 +96,15 @@ export class CarsController {
 		}
 		
 		return this.carsService.findOne(id, isAdmin, driverId);
+	}
+
+	/**
+	 * Get unavailable dates for a car
+	 * GET /cars/:id/unavailable-dates
+	 */
+	@Get(':id/unavailable-dates')
+	async getUnavailableDates(@Param('id', ParseIntPipe) id: number) {
+		return this.carsService.getUnavailableDates(id);
 	}
 
 	/**
@@ -122,6 +161,18 @@ export class CarsController {
 	) {
 		const driverId = req.user.id;
 		return this.carsService.respondToBooking(bookingId, driverId, body.response, body.driver_notes);
+	}
+
+	/**
+	 * Cancel booking (Customer)
+	 * POST /cars/bookings/:id/cancel
+	 */
+	@Post('bookings/:id/cancel')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.client)
+	async cancelBooking(@Param('id', ParseIntPipe) bookingId: number, @Request() req: any) {
+		const userId = req.user.id;
+		return this.carsService.cancelBooking(bookingId, userId);
 	}
 
 	/**
