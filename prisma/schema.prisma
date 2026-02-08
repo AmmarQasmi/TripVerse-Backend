@@ -370,7 +370,7 @@ model HotelReview {
   id         Int      @id @default(autoincrement())
   user_id    Int
   hotel_id   Int
-  rating     Int      // 1-5
+  rating     Int // 1-5
   comment    String?  @db.Text
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
