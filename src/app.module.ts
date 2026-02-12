@@ -18,6 +18,7 @@ import { AdminModule } from './admin/admin.module';
 import { CloudinaryModule } from './common/cloudinary/cloudinary.module';
 import { UploadModule } from './common/upload/upload.module';
 import { NotificationsModule } from './notifications/notifications.module';
+import { ChatModule } from './chat/chat.module';
 
 @Module({
 	imports: [
@@ -43,6 +44,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 		AdminModule,
 		UploadModule,
 		NotificationsModule,
+		ChatModule,
 	],
 })
 export class AppModule {}

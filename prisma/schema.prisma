@@ -130,6 +130,24 @@ enum NotificationType {
   chat_message
 }
 
+// AI Chatbot Enums
+enum AiAgentType {
+  ITINERARY_GENERATOR
+  PERSONAL_ASSISTANT
+}
+
+enum AiMessageRole {
+  user
+  assistant
+  system
+}
+
+enum AiSessionStatus {
+  active
+  completed
+  expired
+}
+
 // =====================
 // Core Tables
 // =====================
@@ -181,6 +199,8 @@ model User {
   recognitions                  MonumentRecognition[]
   monumentExports               MonumentExportLog[]
   chatMessages                  ChatMessage[]
+  aiChatSessions                AiChatSession[]
+  generatedItineraries          GeneratedItinerary[]
   reviewedDocuments             DriverDocument[]       @relation("DocumentReviewer")
   reviewedHotelManagerDocuments HotelManagerDocument[] @relation("HotelManagerDocumentReviewer")
 
@@ -682,4 +702,68 @@ model ChatMessage {
 
   @@index([chat_id, sent_at])
   @@index([sender_id])
+}
+
+// =====================
+// AI Chatbot Tables
+// =====================
+
+model AiChatSession {
+  id            Int             @id @default(autoincrement())
+  user_id       Int
+  agent_type    AiAgentType
+  status        AiSessionStatus @default(active)
+  current_state String          @default("init") // Tracks conversation state machine position
+  slots         Json?           @default("{}") // Collected slot data as JSON
+  title         String?         // Auto-generated session title (e.g., "Trip to Paris")
+  created_at    DateTime        @default(now())
+  updated_at    DateTime        @updatedAt
+  expires_at    DateTime?       // Session expiration
+
+  user               User                @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  messages           AiChatMessage[]
+  generatedItinerary GeneratedItinerary?
+
+  @@index([user_id, agent_type])
+  @@index([user_id, status])
+  @@index([status])
+  @@index([created_at])
+  @@map("ai_chat_sessions")
+}
+
+model AiChatMessage {
+  id          Int           @id @default(autoincrement())
+  session_id  Int
+  role        AiMessageRole
+  content     String        @db.Text
+  metadata    Json?         // Structured data (slot extraction results, etc.)
+  token_count Int?          // Track token usage per message
+  created_at  DateTime      @default(now())
+
+  session AiChatSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
+
+  @@index([session_id, created_at])
+  @@map("ai_chat_messages")
+}
+
+model GeneratedItinerary {
+  id             Int       @id @default(autoincrement())
+  session_id     Int       @unique
+  user_id        Int
+  destination    String
+  travel_style   String?
+  budget         String?
+  interests      Json?     @default("[]")
+  start_date     DateTime? @db.Date
+  end_date       DateTime? @db.Date
+  itinerary_data Json      // Full structured 4-day itinerary output
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @updatedAt
+
+  session AiChatSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
+  user    User          @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([user_id, created_at])
+  @@index([destination])
+  @@map("generated_itineraries")
 }

@@ -5,9 +5,10 @@ import { ScheduledJobsService } from './scheduled-jobs.service';
 import { DriversModule } from '../drivers/drivers.module';
 import { HotelManagersModule } from '../hotel-managers/hotel-managers.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { ChatModule } from '../chat/chat.module';
 
 @Module({
-	imports: [DriversModule, HotelManagersModule, NotificationsModule],
+	imports: [DriversModule, HotelManagersModule, NotificationsModule, ChatModule],
 	controllers: [AdminController],
 	providers: [AdminService, ScheduledJobsService],
 	exports: [AdminService], // Export for use in CarsModule
