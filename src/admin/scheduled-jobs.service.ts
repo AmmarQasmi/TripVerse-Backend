@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { AccountStatus, HotelBookingStatus } from '@prisma/client';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { ChatService } from '../chat/services/chat.service';
 
 @Injectable()
 export class ScheduledJobsService {
@@ -11,6 +12,7 @@ export class ScheduledJobsService {
 	constructor(
 		@Inject(PrismaService) private prisma: PrismaService,
 		private notificationsService: CommonNotificationsService,
+		@Inject(ChatService) private chatService: ChatService,
 	) {}
 
 	/**
@@ -276,6 +278,21 @@ export class ScheduledJobsService {
 		}
 
 		this.logger.log(`Completed expired booking cleanup. Cancelled ${updateResult.count} booking(s)`);
+	}
+
+	/**
+	 * Expire stale AI chat sessions every hour.
+	 */
+	@Cron(CronExpression.EVERY_HOUR)
+	async expireAiChatSessions() {
+		try {
+			const count = await this.chatService.expireStaleSessions();
+			if (count > 0) {
+				this.logger.log(`AI chat session cleanup: expired ${count} session(s)`);
+			}
+		} catch (error) {
+			this.logger.error('AI chat session cleanup failed:', error);
+		}
 	}
 }
 

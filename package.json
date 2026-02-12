@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@google-cloud/vision": "^5.3.4",
+    "@google/generative-ai": "^0.24.1",
     "@nestjs/cli": "^11.0.10",
     "@nestjs/common": "^10.4.20",
     "@nestjs/config": "^4.0.2",
