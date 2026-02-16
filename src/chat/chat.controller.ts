@@ -6,22 +6,30 @@ import {
   Body,
   Param,
   Query,
+  Res,
   ParseIntPipe,
   UseGuards,
+  NotFoundException,
 } from '@nestjs/common';
+import { Response } from 'express';
 import { Role, AiAgentType } from '@prisma/client';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ChatService } from './services/chat.service';
+import { PlacesService } from './services/places.service';
 import { CreateSessionDto, SendMessageDto } from './dto';
+import { ChatRateLimitGuard } from '../common/guards/rate-limit.guard';
 
 @Controller('chat')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.client)
 export class ChatController {
-  constructor(private chatService: ChatService) {}
+  constructor(
+    private chatService: ChatService,
+    private placesService: PlacesService,
+  ) {}
 
   /**
    * POST /chat/sessions
@@ -48,6 +56,7 @@ export class ChatController {
    * Send a message to an existing session.
    */
   @Post('message')
+  @UseGuards(ChatRateLimitGuard)
   async sendMessage(
     @CurrentUser() user: any,
     @Body() dto: SendMessageDto,
@@ -110,5 +119,36 @@ export class ChatController {
       success: true,
       data: result,
     };
+  }
+
+  // =============================================
+  // Photo Proxy — serves Google Places photos without exposing API key
+  // =============================================
+
+  /**
+   * GET /chat/photos/:photoReference
+   * Proxies a Google Places photo.
+   * The frontend uses this URL directly in <img> tags.
+   * Query: ?maxwidth=800 (optional, default 800)
+   */
+  @Get('photos/:photoReference')
+  async getPhoto(
+    @Param('photoReference') photoReference: string,
+    @Res() res: Response,
+    @Query('maxwidth') maxWidth?: string,
+  ) {
+    const width = maxWidth ? parseInt(maxWidth, 10) : 800;
+    const photo = await this.placesService.getPlacePhoto(photoReference, width);
+
+    if (!photo) {
+      throw new NotFoundException('Photo not found');
+    }
+
+    res.set({
+      'Content-Type': photo.contentType,
+      'Cache-Control': 'public, max-age=86400', // Cache for 24 hours
+      'Content-Length': photo.buffer.length.toString(),
+    });
+    res.send(photo.buffer);
   }
 }

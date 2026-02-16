@@ -19,6 +19,7 @@ import { CloudinaryModule } from './common/cloudinary/cloudinary.module';
 import { UploadModule } from './common/upload/upload.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { ChatModule } from './chat/chat.module';
+import { ItineraryModule } from './itineraries/itinerary.module';
 
 @Module({
 	imports: [
@@ -45,6 +46,7 @@ import { ChatModule } from './chat/chat.module';
 		UploadModule,
 		NotificationsModule,
 		ChatModule,
+		ItineraryModule,
 	],
 })
 export class AppModule {}
