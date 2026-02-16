@@ -148,6 +148,13 @@ enum AiSessionStatus {
   expired
 }
 
+enum ItineraryStatus {
+  preview
+  enriching
+  complete
+  failed
+}
+
 // =====================
 // Core Tables
 // =====================
@@ -747,23 +754,31 @@ model AiChatMessage {
 }
 
 model GeneratedItinerary {
-  id             Int       @id @default(autoincrement())
-  session_id     Int       @unique
+  id             Int              @id @default(autoincrement())
+  session_id     Int?             @unique
   user_id        Int
+  title          String           // e.g. "4 Days in Paris"
   destination    String
+  duration_days  Int              @default(1)
   travel_style   String?
   budget         String?
-  interests      Json?     @default("[]")
-  start_date     DateTime? @db.Date
-  end_date       DateTime? @db.Date
-  itinerary_data Json      // Full structured 4-day itinerary output
-  created_at     DateTime  @default(now())
-  updated_at     DateTime  @updatedAt
 
-  session AiChatSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
-  user    User          @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  // Preview data (from initial Gemini response)
+  preview_data   Json             // { days: [{ title, places: [name, est_cost] }] }
+
+  // Full enriched data (after enrichment pipeline)
+  enriched_data  Json?            // { days: [{ title, places: [PlaceDetail] }] }
+
+  status         ItineraryStatus  @default(preview)
+
+  created_at     DateTime         @default(now())
+  updated_at     DateTime         @updatedAt
+
+  session AiChatSession? @relation(fields: [session_id], references: [id], onDelete: SetNull)
+  user    User           @relation(fields: [user_id], references: [id], onDelete: Cascade)
 
   @@index([user_id, created_at])
+  @@index([user_id, status])
   @@index([destination])
   @@map("generated_itineraries")
 }

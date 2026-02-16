@@ -10,29 +10,28 @@ import { Content } from '@google/generative-ai';
 import { PrismaService } from '../../prisma/prisma.service';
 import { ItineraryAgentService } from './itinerary-agent.service';
 import { PersonalAssistantService } from './personal-assistant.service';
-import { GeminiService } from './gemini.service';
+import { ItineraryService } from '../../itineraries/itinerary.service';
 
 export interface ChatResponse {
   sessionId: number;
   message: string;
-  currentState: string;
-  slots: Record<string, any>;
-  itineraryData?: any;
-  advisoryData?: any;
+  context: Record<string, any>;
+  previewData?: any;
+  itineraryId?: number;
   isComplete: boolean;
 }
 
 @Injectable()
 export class ChatService {
   private readonly logger = new Logger(ChatService.name);
-  private readonly MAX_HISTORY_MESSAGES = 20; // Limit context window
+  private readonly MAX_HISTORY_MESSAGES = 30;
   private readonly SESSION_EXPIRY_HOURS = 24;
 
   constructor(
     private prisma: PrismaService,
     private itineraryAgent: ItineraryAgentService,
     private personalAssistant: PersonalAssistantService,
-    private geminiService: GeminiService,
+    private itineraryService: ItineraryService,
   ) {}
 
   // =============================================
@@ -42,7 +41,7 @@ export class ChatService {
   /**
    * Create a new chat session for a user.
    */
-  async createSession(userId: number, agentType: AiAgentType, title?: string): Promise<any> {
+  async createSession(userId: number, agentType: AiAgentType, title?: string) {
     const expiresAt = new Date();
     expiresAt.setHours(expiresAt.getHours() + this.SESSION_EXPIRY_HOURS);
 
@@ -51,15 +50,20 @@ export class ChatService {
         user_id: userId,
         agent_type: agentType,
         status: AiSessionStatus.active,
-        current_state: 'init',
+        current_state: 'active',
         slots: {},
         title: title || this.getDefaultTitle(agentType),
         expires_at: expiresAt,
       },
     });
 
-    // Generate greeting message
-    const greeting = await this.processInitialMessage(session.id, agentType);
+    // Generate greeting
+    const greeting = agentType === AiAgentType.ITINERARY_GENERATOR
+      ? this.itineraryAgent.getGreeting()
+      : this.personalAssistant.getGreeting();
+
+    // Save greeting as assistant message
+    await this.saveMessage(session.id, AiMessageRole.assistant, greeting);
 
     return {
       session: {
@@ -77,93 +81,112 @@ export class ChatService {
    * Send a message to an existing session.
    */
   async sendMessage(userId: number, sessionId: number, message: string): Promise<ChatResponse> {
-    // Load session and validate ownership
     const session = await this.prisma.aiChatSession.findUnique({
       where: { id: sessionId },
     });
 
-    if (!session) {
-      throw new NotFoundException('Chat session not found');
-    }
-    if (session.user_id !== userId) {
-      throw new ForbiddenException('You do not have access to this session');
-    }
+    if (!session) throw new NotFoundException('Chat session not found');
+    if (session.user_id !== userId) throw new ForbiddenException('You do not have access to this session');
     if (session.status === AiSessionStatus.expired) {
       throw new BadRequestException('This session has expired. Please start a new one.');
     }
 
-    // Load conversation history BEFORE saving user message
-    // This ensures history ends with model's last response (proper alternation).
-    // If we save first, history includes the new user msg → Gemini sees
-    // two consecutive 'user' turns when the agent sends its own prompt.
+    // Load history BEFORE saving user message (proper Gemini alternation)
     const history = await this.loadConversationHistory(sessionId);
 
-    // Now persist the user message
+    // Save user message
     await this.saveMessage(sessionId, AiMessageRole.user, message);
 
-    // Route to appropriate agent
-    const currentSlots = (session.slots as Record<string, any>) || {};
+    // Get session context (replaces old "slots")
+    const sessionContext = (session.slots as Record<string, any>) || {};
+
+    // Route to agent
     let agentResponse: any;
 
-    if (session.agent_type === AiAgentType.ITINERARY_GENERATOR) {
-      agentResponse = await this.itineraryAgent.processMessage(
-        session.current_state,
-        currentSlots,
-        message,
-        history,
-      );
-    } else {
-      agentResponse = await this.personalAssistant.processMessage(
-        session.current_state,
-        currentSlots,
-        message,
-        history,
-      );
+    try {
+      if (session.agent_type === AiAgentType.ITINERARY_GENERATOR) {
+        agentResponse = await this.itineraryAgent.processMessage(
+          message,
+          history,
+          sessionContext,
+        );
+      } else {
+        agentResponse = await this.personalAssistant.processMessage(
+          message,
+          history,
+          sessionContext,
+        );
+      }
+    } catch (error: any) {
+      this.logger.error(`Agent error: ${error.message}`, error.stack);
+      // Return detailed error info so the user knows what happened
+      const errorHint = error.message?.toLowerCase() || '';
+      let userMessage = "I'm sorry, I ran into an issue processing your message. Could you try again in a moment?";
+
+      if (errorHint.includes('rate limit') || errorHint.includes('quota') || errorHint.includes('429')) {
+        userMessage = "I'm currently experiencing high demand. Please wait a minute and try again. 🙏";
+      } else if (errorHint.includes('unavailable') || errorHint.includes('503')) {
+        userMessage = "The AI service is temporarily unavailable. Please try again in a few seconds.";
+      } else if (errorHint.includes('api key') || errorHint.includes('not initialized')) {
+        userMessage = "There's a configuration issue on our end. Please contact support.";
+      } else if (errorHint.includes('too long') || errorHint.includes('token')) {
+        userMessage = "That conversation got quite long! Try starting a new chat session.";
+      }
+
+      agentResponse = {
+        text: userMessage,
+        context: sessionContext,
+      };
     }
 
     // Save assistant response
-    await this.saveMessage(sessionId, AiMessageRole.assistant, agentResponse.text, {
-      state: agentResponse.nextState,
+    const assistantMsgId = await this.saveMessage(sessionId, AiMessageRole.assistant, agentResponse.text, {
       tokenCount: agentResponse.tokenCount,
+      hasPreview: !!agentResponse.previewData,
     });
 
-    // Update session state and slots
-    const isComplete = agentResponse.nextState === 'complete' || agentResponse.nextState === 'followup';
+    // Update session context
     await this.prisma.aiChatSession.update({
       where: { id: sessionId },
       data: {
-        current_state: agentResponse.nextState,
-        slots: agentResponse.updatedSlots,
-        status: isComplete ? AiSessionStatus.completed : AiSessionStatus.active,
+        slots: agentResponse.context,
+        // Update title if destination was detected for the first time
+        ...(agentResponse.context?.destination && !sessionContext.destination
+          ? { title: `Trip to ${agentResponse.context.destination}` }
+          : {}),
       },
     });
 
-    // If itinerary was generated, save it
-    if (agentResponse.itineraryData) {
-      await this.saveGeneratedItinerary(
-        sessionId,
-        userId,
-        agentResponse.updatedSlots,
-        agentResponse.itineraryData,
-      );
+    // If preview was generated, save it as a new itinerary (status: preview)
+    let itineraryId: number | undefined;
+    if (agentResponse.previewData) {
+      try {
+        const itinerary = await this.itineraryService.createFromPreview(
+          userId,
+          sessionId,
+          agentResponse.previewData,
+          agentResponse.context,
+        );
+        itineraryId = itinerary.id;
+        this.logger.log(`Saved preview itinerary ${itinerary.id} for session ${sessionId}`);
 
-      // Update session title to be more descriptive
-      await this.prisma.aiChatSession.update({
-        where: { id: sessionId },
-        data: {
-          title: `Trip to ${agentResponse.updatedSlots.destination || 'Unknown'}`,
-        },
-      });
+        // Update the assistant message metadata with the itinerary ID so it survives re-fetches
+        await this.prisma.aiChatMessage.update({
+          where: { id: assistantMsgId },
+          data: { metadata: { tokenCount: agentResponse.tokenCount, hasPreview: true, itineraryId: itinerary.id } },
+        });
+      } catch (err: any) {
+        this.logger.error(`Failed to save preview: ${err.message}`);
+      }
     }
 
     return {
       sessionId,
       message: agentResponse.text,
-      currentState: agentResponse.nextState,
-      slots: agentResponse.updatedSlots,
-      itineraryData: agentResponse.itineraryData || undefined,
-      advisoryData: agentResponse.advisoryData || undefined,
-      isComplete,
+      context: agentResponse.context,
+      previewData: agentResponse.previewData || undefined,
+      itineraryId,
+      isComplete: false,
     };
   }
 
@@ -221,30 +244,29 @@ export class ChatService {
         generatedItinerary: {
           select: {
             id: true,
+            title: true,
             destination: true,
+            duration_days: true,
             travel_style: true,
             budget: true,
-            interests: true,
-            itinerary_data: true,
+            status: true,
+            preview_data: true,
+            enriched_data: true,
             created_at: true,
           },
         },
       },
     });
 
-    if (!session) {
-      throw new NotFoundException('Chat session not found');
-    }
-    if (session.user_id !== userId) {
-      throw new ForbiddenException('You do not have access to this session');
-    }
+    if (!session) throw new NotFoundException('Chat session not found');
+    if (session.user_id !== userId) throw new ForbiddenException('You do not have access to this session');
 
     return {
       id: session.id,
       agentType: session.agent_type,
       status: session.status,
       currentState: session.current_state,
-      slots: session.slots,
+      context: session.slots,
       title: session.title,
       createdAt: session.created_at,
       updatedAt: session.updated_at,
@@ -255,7 +277,20 @@ export class ChatService {
         metadata: m.metadata,
         createdAt: m.created_at,
       })),
-      generatedItinerary: session.generatedItinerary || null,
+      generatedItinerary: session.generatedItinerary
+        ? {
+            id: session.generatedItinerary.id,
+            title: session.generatedItinerary.title,
+            destination: session.generatedItinerary.destination,
+            durationDays: session.generatedItinerary.duration_days,
+            travelStyle: session.generatedItinerary.travel_style,
+            budget: session.generatedItinerary.budget,
+            status: session.generatedItinerary.status,
+            previewData: session.generatedItinerary.preview_data,
+            enrichedData: session.generatedItinerary.enriched_data,
+            createdAt: session.generatedItinerary.created_at,
+          }
+        : null,
     };
   }
 
@@ -278,44 +313,13 @@ export class ChatService {
   // Internal Helpers
   // =============================================
 
-  /**
-   * Process the initial greeting message when a session is created.
-   */
-  private async processInitialMessage(sessionId: number, agentType: AiAgentType): Promise<string> {
-    let greeting: string;
-
-    if (agentType === AiAgentType.ITINERARY_GENERATOR) {
-      const result = await this.itineraryAgent.processMessage('init', {}, '', []);
-      greeting = result.text;
-      await this.prisma.aiChatSession.update({
-        where: { id: sessionId },
-        data: { current_state: result.nextState },
-      });
-    } else {
-      const result = await this.personalAssistant.processMessage('init', {}, '', []);
-      greeting = result.text;
-      await this.prisma.aiChatSession.update({
-        where: { id: sessionId },
-        data: { current_state: result.nextState },
-      });
-    }
-
-    // Save greeting as assistant message
-    await this.saveMessage(sessionId, AiMessageRole.assistant, greeting);
-
-    return greeting;
-  }
-
-  /**
-   * Save a message to the database.
-   */
   private async saveMessage(
     sessionId: number,
     role: AiMessageRole,
     content: string,
     metadata?: any,
-  ) {
-    await this.prisma.aiChatMessage.create({
+  ): Promise<number> {
+    const msg = await this.prisma.aiChatMessage.create({
       data: {
         session_id: sessionId,
         role,
@@ -324,12 +328,12 @@ export class ChatService {
         token_count: metadata?.tokenCount || undefined,
       },
     });
+    return msg.id;
   }
 
   /**
    * Load conversation history formatted for Gemini API.
-   * Gemini requires strict user/model alternation starting with 'user'.
-   * If the conversation is long, summarize older messages to fit context window.
+   * Enforces strict user/model alternation starting with 'user'.
    */
   private async loadConversationHistory(sessionId: number): Promise<Content[]> {
     const totalCount = await this.prisma.aiChatMessage.count({
@@ -374,7 +378,7 @@ export class ChatService {
       rawMessages = [summaryMsg, ...recentMessages.reverse()];
     }
 
-    // Filter out system messages and map roles
+    // Map roles and enforce Gemini alternation
     const mapped = rawMessages
       .filter((m) => m.role !== 'system')
       .map((m) => ({
@@ -382,21 +386,19 @@ export class ChatService {
         text: m.content,
       }));
 
-    // Enforce strict alternation: merge consecutive same-role messages
-    // and ensure the history starts with 'user' (Gemini requirement)
+    // Merge consecutive same-role messages
     const alternated: { role: 'user' | 'model'; text: string }[] = [];
     for (const msg of mapped) {
       if (alternated.length === 0) {
         alternated.push(msg);
       } else if (alternated[alternated.length - 1].role === msg.role) {
-        // Merge with previous same-role message
         alternated[alternated.length - 1].text += '\n' + msg.text;
       } else {
         alternated.push(msg);
       }
     }
 
-    // Gemini requires first message to be 'user' — drop leading 'model' messages
+    // Gemini requires first message to be 'user'
     while (alternated.length > 0 && alternated[0].role === 'model') {
       alternated.shift();
     }
@@ -422,46 +424,6 @@ export class ChatService {
       this.logger.log(`Expired ${result.count} stale AI chat sessions`);
     }
     return result.count;
-  }
-
-  /**
-   * Save the generated itinerary to the database.
-   */
-  private async saveGeneratedItinerary(
-    sessionId: number,
-    userId: number,
-    slots: Record<string, any>,
-    itineraryData: any,
-  ) {
-    try {
-      await this.prisma.generatedItinerary.create({
-        data: {
-          session_id: sessionId,
-          user_id: userId,
-          destination: slots.destination || 'Unknown',
-          travel_style: slots.travelStyle || null,
-          budget: slots.budget || null,
-          interests: Array.isArray(slots.interests) ? slots.interests : [],
-          start_date: this.parseDateSafe(slots.dates, 'start'),
-          end_date: this.parseDateSafe(slots.dates, 'end'),
-          itinerary_data: itineraryData,
-        },
-      });
-    } catch (error: any) {
-      this.logger.error(`Failed to save itinerary: ${error.message}`);
-      // Non-critical — don't throw, the user already has the response
-    }
-  }
-
-  private parseDateSafe(dates: string | undefined, type: 'start' | 'end'): Date | null {
-    if (!dates || dates === 'skipped' || dates === 'flexible') return null;
-    try {
-      // Simple parse — expects "YYYY-MM-DD to YYYY-MM-DD" format
-      const parts = dates.split(/\s*to\s*/i);
-      if (type === 'start' && parts[0]) return new Date(parts[0]);
-      if (type === 'end' && parts[1]) return new Date(parts[1]);
-    } catch {}
-    return null;
   }
 
   private getDefaultTitle(agentType: AiAgentType): string {
