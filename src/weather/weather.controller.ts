@@ -28,6 +28,49 @@ export class WeatherController {
 		}
 		return this.weatherService.getForecast(city, days || 7);
 	}
+
+	/**
+	 * Get current weather by coordinates (for geolocation)
+	 */
+	@Get('coordinates/current')
+	async getCurrentWeatherByCoordinates(
+		@Query('lat') lat: string,
+		@Query('lon') lon: string,
+	) {
+		if (!lat || !lon) {
+			throw new Error('Latitude and longitude parameters are required');
+		}
+		const latitude = parseFloat(lat);
+		const longitude = parseFloat(lon);
+		
+		if (isNaN(latitude) || isNaN(longitude)) {
+			throw new Error('Invalid latitude or longitude values');
+		}
+		
+		return this.weatherService.getCurrentWeatherByCoordinates(latitude, longitude);
+	}
+
+	/**
+	 * Get weather forecast by coordinates (for geolocation)
+	 */
+	@Get('coordinates/forecast')
+	async getForecastByCoordinates(
+		@Query('lat') lat: string,
+		@Query('lon') lon: string,
+		@Query('days', new ParseIntPipe({ optional: true })) days?: number,
+	) {
+		if (!lat || !lon) {
+			throw new Error('Latitude and longitude parameters are required');
+		}
+		const latitude = parseFloat(lat);
+		const longitude = parseFloat(lon);
+		
+		if (isNaN(latitude) || isNaN(longitude)) {
+			throw new Error('Invalid latitude or longitude values');
+		}
+		
+		return this.weatherService.getForecastByCoordinates(latitude, longitude, days || 7);
+	}
 }
 
 

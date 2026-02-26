@@ -2150,22 +2150,27 @@ export class CarsService {
 	}
 
 	private async getWikipediaData(cityName: string) {
-		// Try multiple Wikipedia search strategies
+		// Wikipedia requires a descriptive User-Agent header or it returns 403
+		const wikiHeaders = {
+			'User-Agent': 'TripVerse/1.0 (https://tripverse.app; contact@tripverse.app) axios/1.x',
+		};
+
+		// Strategy 1: Wikipedia REST API v1 (fast, structured)
 		const searchVariants = [
-			cityName,                        // e.g. "Sibi"
-			`${cityName}, Pakistan`,          // e.g. "Sibi, Pakistan"
-			`${cityName} (city)`,             // e.g. "Sibi (city)"
+			cityName,
+			`${cityName}, Pakistan`,
+			`${cityName} (city)`,
 		];
 
 		for (const variant of searchVariants) {
 			try {
 				const response = await axios.get(
 					`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(variant)}`,
-					{ timeout: 10000 },
+					{ timeout: 8000, headers: wikiHeaders },
 				);
 
-				// Skip disambiguation pages or empty extracts
 				if (response.data.type === 'disambiguation' || !response.data.extract) {
+					this.logger.debug(`REST API: skipping "${variant}" (type=${response.data.type}, hasExtract=${!!response.data.extract})`);
 					continue;
 				}
 
@@ -2174,13 +2179,57 @@ export class CarsService {
 					thumbnail: response.data.thumbnail?.source || null,
 					url: response.data.content_urls?.desktop?.page || '',
 				};
-			} catch {
-				// This variant failed (404 etc.), try next
+			} catch (err: any) {
+				this.logger.warn(`REST API failed for "${variant}": ${err?.message || err} (code=${err?.code}, status=${err?.response?.status})`);
 				continue;
 			}
 		}
 
-		this.logger.warn(`No Wikipedia data found for ${cityName} after trying all variants`);
+		// Strategy 2: MediaWiki action=query API (more reliable fallback)
+		const mwVariants = [cityName, `${cityName}, Pakistan`];
+		for (const variant of mwVariants) {
+			try {
+				const response = await axios.get('https://en.wikipedia.org/w/api.php', {
+					params: {
+						action: 'query',
+						titles: variant,
+						prop: 'extracts|pageimages|info',
+						exintro: true,
+						explaintext: true,
+						piprop: 'thumbnail',
+						pithumbsize: 400,
+						inprop: 'url',
+						redirects: 1,
+						format: 'json',
+					},
+					headers: wikiHeaders,
+					timeout: 8000,
+				});
+
+				const pages = response.data?.query?.pages;
+				if (!pages) {
+					this.logger.warn(`MediaWiki API: no pages in response for "${variant}"`);
+					continue;
+				}
+
+				const page = Object.values(pages)[0] as any;
+				if (!page || page.pageid === -1 || !page.extract) {
+					this.logger.warn(`MediaWiki API: page not found or no extract for "${variant}" (pageid=${page?.pageid})`);
+					continue;
+				}
+
+				return {
+					summary: page.extract,
+					thumbnail: page.thumbnail?.source || null,
+					url: `https://en.wikipedia.org/wiki/${encodeURIComponent(page.title || variant)}`,
+				};
+			} catch (err: any) {
+				this.logger.warn(`MediaWiki API failed for "${variant}": ${err?.message || err} (code=${err?.code}, status=${err?.response?.status})`);
+				continue;
+			}
+		}
+
+		this.logger.warn(`No Wikipedia data found for ${cityName} after all strategies`);
 		return { summary: '', thumbnail: null, url: '' };
 	}
 

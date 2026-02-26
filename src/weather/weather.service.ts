@@ -114,6 +114,51 @@ export class WeatherService {
 	}
 
 	/**
+	 * Get current weather by coordinates (for geolocation)
+	 */
+	async getCurrentWeatherByCoordinates(lat: number, lon: number) {
+		try {
+			// Fetch weather directly with coordinates
+			const response: AxiosResponse<CurrentWeatherResponse> = await axios.get(this.WEATHER_API, {
+				params: {
+					latitude: lat,
+					longitude: lon,
+					current: 'temperature_2m,weather_code,relative_humidity_2m,wind_speed_10m',
+					timezone: 'auto',
+				},
+			});
+
+			const current = response.data?.current;
+			if (!current) {
+				throw new HttpException('Invalid weather data received', HttpStatus.INTERNAL_SERVER_ERROR);
+			}
+			
+			const { condition, icon } = this.mapWeatherCode(current.weather_code);
+
+			return {
+				temperature: Math.round(current.temperature_2m),
+				condition,
+				humidity: current.relative_humidity_2m,
+				windSpeed: Math.round(current.wind_speed_10m),
+				cityName: `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`,
+				icon,
+				weatherCode: current.weather_code,
+				time: current.time,
+				coordinates: { lat, lon },
+			};
+		} catch (error: unknown) {
+			if (error instanceof HttpException) {
+				throw error;
+			}
+			const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+			throw new HttpException(
+				`Failed to fetch weather for coordinates (${lat}, ${lon}): ${errorMessage}`,
+				HttpStatus.INTERNAL_SERVER_ERROR,
+			);
+		}
+	}
+
+	/**
 	 * Get current weather for a city
 	 */
 	async getCurrentWeather(cityName: string) {
@@ -155,6 +200,56 @@ export class WeatherService {
 			const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 			throw new HttpException(
 				`Failed to fetch weather for "${cityName}": ${errorMessage}`,
+				HttpStatus.INTERNAL_SERVER_ERROR,
+			);
+		}
+	}
+
+	/**
+	 * Get weather forecast by coordinates (for geolocation)
+	 */
+	async getForecastByCoordinates(lat: number, lon: number, days: number = 7) {
+		try {
+			// Fetch forecast directly with coordinates
+			const response: AxiosResponse<ForecastResponse> = await axios.get(this.WEATHER_API, {
+				params: {
+					latitude: lat,
+					longitude: lon,
+					daily: 'weather_code,temperature_2m_max,temperature_2m_min',
+					timezone: 'auto',
+					forecast_days: Math.min(days, 16), // Open-Meteo supports up to 16 days
+				},
+			});
+
+			const daily = response.data?.daily;
+			if (!daily || !daily.time || !daily.weather_code || !daily.temperature_2m_max || !daily.temperature_2m_min) {
+				throw new HttpException('Invalid forecast data received', HttpStatus.INTERNAL_SERVER_ERROR);
+			}
+			
+			const forecast = daily.time.map((time: string, index: number) => {
+				const { condition, icon } = this.mapWeatherCode(daily.weather_code[index]);
+				return {
+					date: time,
+					condition,
+					icon,
+					temperatureMax: Math.round(daily.temperature_2m_max[index]),
+					temperatureMin: Math.round(daily.temperature_2m_min[index]),
+					weatherCode: daily.weather_code[index],
+				};
+			});
+
+			return {
+				cityName: `${lat.toFixed(2)}°, ${lon.toFixed(2)}°`,
+				forecast,
+				coordinates: { lat, lon },
+			};
+		} catch (error: unknown) {
+			if (error instanceof HttpException) {
+				throw error;
+			}
+			const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+			throw new HttpException(
+				`Failed to fetch forecast for coordinates (${lat}, ${lon}): ${errorMessage}`,
 				HttpStatus.INTERNAL_SERVER_ERROR,
 			);
 		}
