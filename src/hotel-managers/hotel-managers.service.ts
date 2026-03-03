@@ -480,7 +480,18 @@ export class HotelManagersService {
 
 		const totalEarnings = parseFloat(earningsResult._sum.total_amount?.toString() || '0');
 		// Platform commission is 5%, manager gets 95%
-		const managerEarnings = totalEarnings * 0.95;
+		const grossManagerEarnings = totalEarnings * 0.95;
+
+		// Deduct fines from resolved disputes against this hotel manager
+		const hotelFinesResult = await this.prisma.dispute.aggregate({
+			where: {
+				bookingHotel: { hotel_id: { in: hotelIds } },
+				status: 'resolved',
+			},
+			_sum: { fine_amount: true },
+		});
+		const totalFines = parseFloat(hotelFinesResult._sum.fine_amount?.toString() || '0');
+		const managerEarnings = Math.max(0, grossManagerEarnings - totalFines);
 
 		return {
 			verification_status: {
@@ -581,10 +592,20 @@ export class HotelManagersService {
 		});
 
 		const totalEarnings = parseFloat(earningsResult._sum.total_amount?.toString() || '0');
-		const managerEarnings = totalEarnings * 0.95; // 95% to manager
+		const grossManagerEarnings = totalEarnings * 0.95; // 95% to manager
+
+		// Deduct fines from resolved disputes
+		const finesResult = await this.prisma.dispute.aggregate({
+			where: {
+				bookingHotel: { hotel_id: { in: hotelIds } },
+				status: 'resolved',
+			},
+			_sum: { fine_amount: true },
+		});
+		const totalFines = parseFloat(finesResult._sum.fine_amount?.toString() || '0');
 
 		return {
-			total_earnings: managerEarnings,
+			total_earnings: Math.max(0, grossManagerEarnings - totalFines),
 			total_bookings: earningsResult._count,
 			currency: 'PKR',
 			bookings: bookings.map((booking) => ({

@@ -10,7 +10,10 @@ const WEIGHTS = {
   category: {
     safety: 5,
     fraud: 5,
+    harassment: 4,
+    rash_driving: 4,
     pricing: 3,
+    verbal_abuse: 3,
     service: 2,
     cleanliness: 2,
   } as Record<DisputeCategory, number>,
@@ -76,6 +79,8 @@ export interface EvaluationResult {
   flags: string[];
   recommendedAction: 'auto_rejected' | 'warning' | 'fine' | 'suspension_or_ban' | 'manual_review';
   breakdown: Record<string, number>;
+  /** PKR fine suggested by the 5-tier grading system; admin may override */
+  suggested_fine: number;
 }
 
 export interface EvaluationContext {
@@ -92,6 +97,8 @@ export interface EvaluationContext {
   }>;
   category: DisputeCategory;
   description: string;
+  /** All categories selected by the customer (primary + extras) — used for multi-category bonus rule */
+  allCategories?: DisputeCategory[];
 }
 
 @Injectable()
@@ -155,14 +162,23 @@ export class DisputeRuleEngineService {
     score += fraudScore;
     breakdown.fraud_detection = fraudScore;
 
-    // 8. Map score → recommended action
+    // 8. Multi-category bonus: ≥3 categories selected → +1 (broader scope of misconduct)
+    const categoryCount = ctx.allCategories?.length ?? 1;
+    if (categoryCount >= 3) {
+      score += 1;
+      breakdown.multi_category_bonus = 1;
+      reasons.push(`${categoryCount} complaint categories selected — broader scope of misconduct: +1`);
+    }
+
+    // 9. Map score → recommended action and compute suggested fine
     const recommendedAction = this.mapScoreToAction(score, flags);
+    const suggested_fine = this.calculateSuggestedFine(score);
 
     this.logger.log(
-      `Dispute evaluation complete: score=${score}, action=${recommendedAction}, flags=[${flags.join(', ')}]`,
+      `Dispute evaluation complete: score=${score}, suggested_fine=PKR${suggested_fine}, action=${recommendedAction}, flags=[${flags.join(', ')}]`,
     );
 
-    return { score, reasons, flags, recommendedAction, breakdown };
+    return { score, reasons, flags, recommendedAction, breakdown, suggested_fine };
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -530,6 +546,22 @@ export class DisputeRuleEngineService {
     }
 
     return 'suspension_or_ban';
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  //  Fine grading: 5-tier system  (admin may override)
+  //  Tier 1 — score ≤ 3 : PKR 0     (warning only)
+  //  Tier 2 — score 4-6 : PKR 500   (minor fine)
+  //  Tier 3 — score 7-9 : PKR 1,000 (moderate fine)
+  //  Tier 4 — score 10-12 : PKR 2,500 (serious fine)
+  //  Tier 5 — score ≥ 13 : PKR 5,000  (severe fine)
+  // ─────────────────────────────────────────────────────────────────────────
+  calculateSuggestedFine(score: number): number {
+    if (score <= 3)  return 0;
+    if (score <= 6)  return 500;
+    if (score <= 9)  return 1_000;
+    if (score <= 12) return 2_500;
+    return 5_000;
   }
 
   // ─────────────────────────────────────────────────────────────────────────

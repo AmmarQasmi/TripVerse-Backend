@@ -344,6 +344,7 @@ export class CarsService {
 		// Expand each booking range into individual dates
 		const unavailableDates: string[] = [];
 		for (const booking of activeBookings) {
+			if (!booking.start_date || !booking.end_date) continue;
 			const current = new Date(booking.start_date);
 			const end = new Date(booking.end_date);
 			while (current <= end) {
@@ -356,8 +357,8 @@ export class CarsService {
 			car_id: carId,
 			unavailable_dates: [...new Set(unavailableDates)].sort(),
 			booking_ranges: activeBookings.map(b => ({
-				start_date: b.start_date.toISOString().split('T')[0],
-				end_date: b.end_date.toISOString().split('T')[0],
+				start_date: b.start_date?.toISOString().split('T')[0] ?? null,
+				end_date: b.end_date?.toISOString().split('T')[0] ?? null,
 				status: b.status,
 			})),
 		};
@@ -423,7 +424,7 @@ export class CarsService {
 	 * Create booking request
 	 */
 	async createBookingRequest(data: any) {
-		const { car_id, user_id, pickup_location, dropoff_location, start_date, end_date, customer_notes } = data;
+		const { car_id, user_id, pickup_location, dropoff_location, start_date, end_date, customer_notes, payment_method } = data;
 
 		// Validate car exists and is available
 		const car = await this.prisma.car.findUnique({
@@ -482,6 +483,7 @@ export class CarsService {
 				platform_fee: priceCalculation.pricing_breakdown.platform_fee,
 				currency: 'pkr',
 				customer_notes,
+				payment_method: payment_method ?? 'online',
 				requested_at: new Date(),
 			},
 			include: {
@@ -725,26 +727,30 @@ export class CarsService {
 			},
 		});
 
-		// Create payment transaction record
-		const paymentTransaction = await this.prisma.paymentTransaction.create({
-			data: {
-				booking_car_id: bookingId,
-				user_id: userId,
-				amount: booking.total_amount,
-				currency: booking.currency,
-				application_fee_amount: booking.platform_fee,
-				status: 'completed',
-			},
-		});
+		// For online bookings: create payment transaction immediately
+		// For cash bookings: payment is collected at trip end by the driver
+		if (booking.payment_method === 'online') {
+			const paymentTransaction = await this.prisma.paymentTransaction.create({
+				data: {
+					booking_car_id: bookingId,
+					user_id: userId,
+					amount: booking.total_amount,
+					currency: booking.currency,
+					application_fee_amount: booking.platform_fee,
+					payment_method: 'online',
+					status: 'completed',
+				},
+			});
 
-		// Create Stripe payment details
-		await this.prisma.stripePaymentDetails.create({
-			data: {
-				payment_transaction_id: paymentTransaction.id,
-				stripe_payment_intent_id: payment.id,
-				stripe_charge_id: payment.charge_id,
-			},
-		});
+			// Create Stripe payment details
+			await this.prisma.stripePaymentDetails.create({
+				data: {
+					payment_transaction_id: paymentTransaction.id,
+					stripe_payment_intent_id: payment.id,
+					stripe_charge_id: payment.charge_id,
+				},
+			});
+		}
 
 		// Create chat for driver-customer communication
 		await this.prisma.chat.create({
@@ -757,23 +763,25 @@ export class CarsService {
 		// Customer notification
 		await this.notificationsService.notifyBookingConfirmed(booking.user_id, bookingId, 'car');
 		
-		// Notify all admins about payment received (platform fee)
-		const admins = await this.prisma.user.findMany({
-			where: { role: 'admin' },
-			select: { id: true },
-		});
-		
-		const adminNotificationPromises = admins.map(admin =>
-			this.notificationsService.createNotification(
-				admin.id,
-				'payment_received',
-				'Payment Received - Car Booking',
-				`Car booking #${bookingId} payment of PKR ${parseFloat(booking.total_amount.toString()).toLocaleString()} has been received. Platform fee (5%): PKR ${parseFloat(booking.platform_fee.toString()).toLocaleString()}`,
-				{ booking_id: bookingId, booking_type: 'car', amount: parseFloat(booking.total_amount.toString()), platform_fee: parseFloat(booking.platform_fee.toString()) },
-			)
-		);
-		
-		await Promise.all(adminNotificationPromises);
+		// Notify all admins about payment received (platform fee) — only for online payments
+		if (booking.payment_method === 'online') {
+			const admins = await this.prisma.user.findMany({
+				where: { role: 'admin' },
+				select: { id: true },
+			});
+			
+			const adminNotificationPromises = admins.map(admin =>
+				this.notificationsService.createNotification(
+					admin.id,
+					'payment_received',
+					'Payment Received - Car Booking',
+					`Car booking #${bookingId} payment of PKR ${parseFloat(booking.total_amount.toString()).toLocaleString()} has been received. Platform fee (5%): PKR ${parseFloat(booking.platform_fee.toString()).toLocaleString()}`,
+					{ booking_id: bookingId, booking_type: 'car', amount: parseFloat(booking.total_amount.toString()), platform_fee: parseFloat(booking.platform_fee.toString()) },
+				)
+			);
+			
+			await Promise.all(adminNotificationPromises);
+		}
 		
 		// Note: Driver is NOT notified here - they will be paid later when ride starts
 
@@ -859,8 +867,8 @@ export class CarsService {
 			estimated_distance: booking.estimated_distance
 				? parseFloat(booking.estimated_distance.toString())
 				: null,
-			start_date: booking.start_date.toISOString().split('T')[0],
-			end_date: booking.end_date.toISOString().split('T')[0],
+			start_date: booking.start_date?.toISOString().split('T')[0] ?? null,
+			end_date: booking.end_date?.toISOString().split('T')[0] ?? null,
 			total_amount: parseFloat(booking.total_amount.toString()),
 			driver_earnings: parseFloat(booking.driver_earnings.toString()),
 			platform_fee: parseFloat(booking.platform_fee.toString()),
@@ -882,6 +890,8 @@ export class CarsService {
 						amount: parseFloat(booking.payments[0].amount.toString()),
 					}
 				: null,
+			payment_method: booking.payment_method,
+			cash_collected: booking.cash_collected,
 		}));
 	}
 
@@ -931,9 +941,13 @@ export class CarsService {
 			},
 			pickup_location: booking.pickup_location,
 			dropoff_location: booking.dropoff_location,
-			start_date: booking.start_date.toISOString().split('T')[0],
-			end_date: booking.end_date.toISOString().split('T')[0],
+			start_date: booking.start_date?.toISOString().split('T')[0] ?? null,
+			end_date: booking.end_date?.toISOString().split('T')[0] ?? null,
+			total_amount: parseFloat(booking.total_amount.toString()),
 			driver_earnings: parseFloat(booking.driver_earnings.toString()),
+			platform_fee: parseFloat(booking.platform_fee.toString()),
+			payment_method: booking.payment_method,
+			cash_collected: booking.cash_collected,
 			created_at: booking.created_at.toISOString(),
 		}));
 	}
@@ -1089,6 +1103,129 @@ export class CarsService {
 			id: updatedBooking.id,
 			status: updatedBooking.status,
 			message: 'Trip completed successfully',
+		};
+	}
+
+	/**
+	 * Collect cash payment (driver confirms cash collected after trip completion)
+	 * Only valid for cash-payment bookings in COMPLETED state
+	 */
+	async collectCash(bookingId: number, driverId: number, collectedAmount: number) {
+		const booking = await this.prisma.carBooking.findUnique({
+			where: { id: bookingId },
+			include: {
+				car: {
+					include: {
+						driver: {
+							include: {
+								user: true,
+							},
+						},
+					},
+				},
+			},
+		});
+
+		if (!booking) {
+			throw new NotFoundException('Booking not found');
+		}
+
+		if (booking.car.driver.user_id !== driverId) {
+			throw new BadRequestException('You are not authorized to collect cash for this booking');
+		}
+
+		if (booking.payment_method !== 'cash') {
+			throw new BadRequestException('This booking is not a cash payment booking');
+		}
+
+		if (booking.status !== 'COMPLETED') {
+			throw new BadRequestException('Trip must be completed before collecting cash');
+		}
+
+		if (booking.cash_collected) {
+			throw new BadRequestException('Cash has already been collected for this booking');
+		}
+
+		// Exact amount validation — driver must enter the pre-calculated fare
+		const expectedAmount = parseFloat(booking.total_amount.toString());
+		if (Math.round(collectedAmount) !== Math.round(expectedAmount)) {
+			throw new BadRequestException(
+				`Collected amount must equal PKR ${Math.round(expectedAmount).toLocaleString()}`,
+			);
+		}
+
+		const platformFee = parseFloat(booking.platform_fee.toString());
+
+		// Mark cash as collected
+		await this.prisma.carBooking.update({
+			where: { id: bookingId },
+			data: { cash_collected: true },
+		});
+
+		// Create payment transaction record for cash
+		await this.prisma.paymentTransaction.create({
+			data: {
+				booking_car_id: bookingId,
+				user_id: booking.user_id,
+				amount: booking.total_amount,
+				currency: booking.currency,
+				application_fee_amount: booking.platform_fee,
+				payment_method: 'cash',
+				status: 'completed',
+			},
+		});
+
+		// Deduct platform commission (5%) from driver's wallet_balance (can go negative = debt)
+		await this.prisma.user.update({
+			where: { id: driverId },
+			data: {
+				wallet_balance: {
+					decrement: platformFee,
+				},
+			},
+		});
+
+		// Get updated wallet balance
+		const updatedDriver = await this.prisma.user.findUnique({
+			where: { id: driverId },
+			select: { wallet_balance: true },
+		});
+
+		const driverEarnings = parseFloat(booking.driver_earnings.toString());
+		const newWalletBalance = parseFloat(updatedDriver?.wallet_balance?.toString() ?? '0');
+
+		// Notify driver
+		await this.notificationsService.createNotification(
+			driverId,
+			'payment_received',
+			'Cash Collection Confirmed',
+			`You have successfully collected PKR ${Math.round(expectedAmount).toLocaleString()} in cash for booking #${bookingId}. Platform commission of PKR ${Math.round(platformFee).toLocaleString()} has been deducted from your wallet. Your net earnings for this trip: PKR ${Math.round(driverEarnings).toLocaleString()}.`,
+			{ booking_id: bookingId, amount: expectedAmount, platform_fee: platformFee, driver_earnings: driverEarnings, wallet_balance: newWalletBalance },
+		);
+
+		// Notify admins about cash collection
+		const admins = await this.prisma.user.findMany({
+			where: { role: 'admin' },
+			select: { id: true },
+		});
+
+		await Promise.all(admins.map(admin =>
+			this.notificationsService.createNotification(
+				admin.id,
+				'payment_received',
+				'Cash Payment Collected - Car Booking',
+				`Driver has collected PKR ${Math.round(expectedAmount).toLocaleString()} cash for booking #${bookingId}. Platform fee (5%): PKR ${Math.round(platformFee).toLocaleString()} deducted from driver wallet.`,
+				{ booking_id: bookingId, booking_type: 'car', payment_method: 'cash', amount: expectedAmount, platform_fee: platformFee },
+			)
+		));
+
+		return {
+			message: 'Cash payment confirmed successfully',
+			booking_id: bookingId,
+			total_collected: Math.round(expectedAmount),
+			platform_fee_deducted: Math.round(platformFee),
+			your_earnings: Math.round(driverEarnings),
+			wallet_balance: newWalletBalance,
 		};
 	}
 

@@ -12,7 +12,7 @@ import { BanDriverDto } from './dto/ban-driver.dto';
 import { ResolveDisputeDto } from './dto/resolve-dispute.dto';
 import { DriverFiltersDto } from './dto/driver-filters.dto';
 import { DisputeFiltersDto } from './dto/dispute-filters.dto';
-import { AccountStatus, DisputeStatus, NotificationType } from '@prisma/client';
+import { AccountStatus, DisputeCategory, DisputeStatus, NotificationType } from '@prisma/client';
 
 /** Set to 'true' to automatically enforce engine actions (warnings, fines, suspensions). */
 const AUTO_ENFORCEMENT_ENABLED = process.env.AUTO_DISPUTE_ENFORCEMENT === 'true';
@@ -129,6 +129,13 @@ export class AdminService {
 		const totalRevenue = parseFloat(revenueResult._sum.amount?.toString() || '0');
 		const totalCommission = parseFloat(revenueResult._sum.application_fee_amount?.toString() || '0');
 
+		// Add fine income from resolved disputes to total revenue
+		const fineRevenueResult = await this.prisma.dispute.aggregate({
+			where: { status: DisputeStatus.resolved },
+			_sum: { fine_amount: true },
+		});
+		const fineRevenue = parseFloat(fineRevenueResult._sum.fine_amount?.toString() || '0');
+
 		return {
 			drivers: {
 				total: totalDrivers,
@@ -147,7 +154,7 @@ export class AdminService {
 				total: totalBookings,
 			},
 			revenue: {
-			total: totalRevenue,
+			total: totalRevenue + fineRevenue,
 			commission: totalCommission,
 			currency: 'PKR',
 			},
@@ -1197,9 +1204,21 @@ export class AdminService {
 							car: dispute.bookingCar?.car,
 							driver: dispute.bookingCar?.car.driver.user,
 						},
-				raised_by: dispute.raised_by,
+					raised_by: dispute.raised_by,
+				category: dispute.category,
+				extra_categories: dispute.extra_categories,
 				description: dispute.description,
 				status: dispute.status,
+				resolution: dispute.resolution,
+				incident_at: dispute.incident_at?.toISOString() || null,
+				severity_score: dispute.severity_score,
+				score_breakdown: dispute.score_breakdown,
+				flagged_for_manual_review: dispute.flagged_for_manual_review,
+				automated_action: dispute.automated_action,
+				automated_action_applied: dispute.automated_action_applied,
+				fine_amount: dispute.fine_amount,
+				booking_car_id: dispute.booking_car_id,
+				booking_hotel_id: dispute.booking_hotel_id,
 				attachments: dispute.attachments,
 				created_at: dispute.created_at.toISOString(),
 				resolved_at: dispute.resolved_at?.toISOString() || null,
@@ -1257,7 +1276,21 @@ export class AdminService {
 	 * evidenceFiles — optional array of Express.Multer.File (images/videos)
 	 */
 	async createDispute(dto: any, evidenceFiles: Express.Multer.File[] = []) {
-		const { booking_hotel_id, booking_car_id, raised_by, description, category, incident_at, reporter_user_id } = dto;
+		const { booking_hotel_id, booking_car_id, raised_by, description, incident_at, reporter_user_id } = dto;
+
+		// Derive ordered primary category from multi-select categories array
+		const SEVERITY_ORDER = ['safety', 'fraud', 'pricing', 'cleanliness', 'service'];
+		const rawCategories: string[] = Array.isArray(dto.categories)
+			? dto.categories
+			: dto.category
+			  ? [dto.category]
+			  : ['service'];
+		const categories = [...new Set(rawCategories)] as any[];
+		categories.sort((a, b) => SEVERITY_ORDER.indexOf(a) - SEVERITY_ORDER.indexOf(b));
+		const primaryCategory = categories[0];
+		const extraCategories = categories.slice(1);
+		// Alias for backward-compat with rest of method
+		const category: string = primaryCategory;
 
 		// ── 1. Basic input validation ──────────────────────────────────────────
 		if (!booking_hotel_id && !booking_car_id) {
@@ -1268,9 +1301,9 @@ export class AdminService {
 		}
 
 		// Safety / fraud complaints require at least some evidence
-		if ((category === 'safety' || category === 'fraud') && evidenceFiles.length === 0) {
+		if ((categories.includes('safety') || categories.includes('fraud')) && evidenceFiles.length === 0) {
 			throw new BadRequestException(
-				`Supporting evidence (images/videos) is required for ${category} complaints`,
+				`Supporting evidence (images/videos) is required for safety and fraud complaints`,
 			);
 		}
 
@@ -1294,10 +1327,10 @@ export class AdminService {
 			// (unless safety/fraud — those get an extended 7-day window)
 			if (bookingEnd) {
 				const hoursSinceEnd = (Date.now() - bookingEnd.getTime()) / (1000 * 60 * 60);
-				const windowHours = category === 'safety' || category === 'fraud' ? 168 : 48;
+				const windowHours = (categories.includes('safety') || categories.includes('fraud')) ? 168 : 48;
 				if (hoursSinceEnd > windowHours) {
 					throw new BadRequestException(
-						`Complaint window has expired. ${category} complaints must be filed within ${windowHours / 24} day(s) of booking completion.`,
+						`Complaint window has expired. These categories must be filed within ${windowHours / 24} day(s) of booking completion.`,
 					);
 				}
 			}
@@ -1315,10 +1348,10 @@ export class AdminService {
 
 			if (bookingEnd) {
 				const hoursSinceEnd = (Date.now() - bookingEnd.getTime()) / (1000 * 60 * 60);
-				const windowHours = category === 'safety' || category === 'fraud' ? 168 : 48;
+				const windowHours = (categories.includes('safety') || categories.includes('fraud')) ? 168 : 48;
 				if (hoursSinceEnd > windowHours) {
 					throw new BadRequestException(
-						`Complaint window has expired. ${category} complaints must be filed within ${windowHours / 24} day(s) of checkout.`,
+						`Complaint window has expired. These categories must be filed within ${windowHours / 24} day(s) of checkout.`,
 					);
 				}
 			}
@@ -1377,7 +1410,8 @@ export class AdminService {
 				booking_car_id: booking_car_id || null,
 				raised_by,
 				reporter_user_id: reporter_user_id || null,
-				category: category || 'service',
+				category: category as any,
+				extra_categories: extraCategories as any,
 				description,
 				incident_at: incident_at ? new Date(incident_at) : null,
 				status: DisputeStatus.pending,
@@ -1409,8 +1443,9 @@ export class AdminService {
 			providerId,
 			providerType,
 			newAttachments: uploadedAttachments,
-			category: category || 'service',
+			category: (category || 'service') as DisputeCategory,
 			description,
+			allCategories: categories as DisputeCategory[],
 		});
 
 		// ── 7. Persist score + flags ───────────────────────────────────────────
@@ -1426,11 +1461,19 @@ export class AdminService {
 					breakdown: evaluation.breakdown,
 					reasons: evaluation.reasons,
 					flags: evaluation.flags,
+					extra_categories: extraCategories,
+					suggested_fine: evaluation.suggested_fine,
 				},
 				flagged_for_manual_review: flaggedForManualReview,
 				automated_action: evaluation.recommendedAction,
 			},
 		});
+
+		// Set extra_categories on the DB column via raw SQL (new field, Prisma client not yet regenerated)
+		if (extraCategories.length > 0) {
+			const catsStr = `{${extraCategories.join(',')}}`;
+			await this.prisma.$executeRaw`UPDATE "Dispute" SET extra_categories = ${catsStr}::"DisputeCategory"[] WHERE id = ${dispute.id}`;
+		}
 
 		// ── 8. Write audit log ─────────────────────────────────────────────────
 		await this.prisma.disputeAuditLog.create({
@@ -1515,8 +1558,9 @@ export class AdminService {
 			select: { id: true },
 		});
 
+		const allCategories = [primaryCategory, ...extraCategories];
 		const adminTitle = flaggedForManualReview ? '🚩 Dispute Needs Manual Review' : 'New Dispute Raised';
-		const adminMsg = `[${category?.toUpperCase()}] Score: ${evaluation.score} | Action: ${evaluation.recommendedAction} | ${description.substring(0, 80)}`;
+		const adminMsg = `[${allCategories.map((c: string) => c.toUpperCase()).join('+')}] Score: ${evaluation.score} | Action: ${evaluation.recommendedAction} | ${description.substring(0, 80)}`;
 
 		for (const admin of admins) {
 			await this.notificationsService.createNotification(
@@ -1534,17 +1578,42 @@ export class AdminService {
 			);
 		}
 
-		// ── 11. Notify other party ─────────────────────────────────────────────
-		const otherPartyUserId = booking_car_id
-			? dispute.bookingCar?.user_id
-			: dispute.bookingHotel?.user_id;
+		// ── 11. Notify provider (driver or hotel manager) ─────────────────────
+		let providerUserId: number | null = null;
 
-		if (otherPartyUserId) {
+		if (booking_car_id && (dispute.bookingCar as any)?.car?.driver?.user_id) {
+			providerUserId = (dispute.bookingCar as any).car.driver.user_id;
+		} else if (booking_hotel_id && hotelManagerId) {
+			const hotelMgr = await this.prisma.hotelManager.findUnique({
+				where: { id: hotelManagerId },
+				select: { user_id: true },
+			});
+			providerUserId = hotelMgr?.user_id ?? null;
+		}
+
+		if (providerUserId) {
+			const providerLabel = booking_car_id ? 'a car booking' : 'a hotel booking';
 			await this.notificationsService.createNotification(
-				otherPartyUserId,
+				providerUserId,
 				'dispute_raised',
-				'Dispute Raised Against You',
-				`A ${category} complaint has been filed regarding your booking. Our team will review it.`,
+				'Complaint Filed Against You',
+				`A ${allCategories.join('/')} complaint has been filed regarding ${providerLabel}. Our team will review it.`,
+				{
+					dispute_id: dispute.id,
+					booking_type: booking_car_id ? 'car' : 'hotel',
+					booking_id: booking_car_id || booking_hotel_id,
+				},
+			);
+		}
+
+		// ── 12. Notify customer (reporter) of successful filing ────────────────
+		if (reporter_user_id) {
+			const receiverLabel = booking_car_id ? 'the driver' : 'the hotel';
+			await this.notificationsService.createNotification(
+				reporter_user_id,
+				'dispute_raised',
+				'Complaint Filed Successfully',
+				`You have successfully filed a complaint against ${receiverLabel}. We will review it and take appropriate action.`,
 				{
 					dispute_id: dispute.id,
 					booking_type: booking_car_id ? 'car' : 'hotel',
@@ -1586,10 +1655,16 @@ export class AdminService {
 			where: { id: disputeId },
 			include: {
 				bookingHotel: {
-					include: { user: true },
+					include: {
+						user: true,
+						hotel: { include: { manager: true } },
+					},
 				},
 				bookingCar: {
-					include: { user: true },
+					include: {
+						user: true,
+						car: { include: { driver: { include: { user: true } } } },
+					},
 				},
 			},
 		});
@@ -1602,21 +1677,46 @@ export class AdminService {
 			throw new BadRequestException('Dispute is already resolved or rejected');
 		}
 
-		// Update dispute status
+		const scoreBreakdown = dispute.score_breakdown as any;
+		const fineAmount = dto.fine_amount ?? scoreBreakdown?.suggested_fine ?? 0;
+
+		// ── Resolve provider user ID ───────────────────────────────────────────
+		let providerUserId: number | null = null;
+		if (dispute.booking_car_id) {
+			providerUserId = (dispute.bookingCar as any)?.car?.driver?.user_id ?? null;
+		} else if (dispute.booking_hotel_id) {
+			providerUserId = (dispute.bookingHotel as any)?.hotel?.manager?.user_id ?? null;
+		}
+
+		// ── Update dispute ─────────────────────────────────────────────────────
 		const updatedDispute = await this.prisma.dispute.update({
 			where: { id: disputeId },
 			data: {
 				status: DisputeStatus.resolved,
+				resolution: dto.resolution,
 				resolved_at: new Date(),
 			},
 		});
 
-		// TODO: Process refund in Phase 2 when payment integration is complete
-		// if (dto.refund_amount && dto.refund_amount > 0) {
-		//   await this.processRefund(dispute, dto.refund_amount);
-		// }
+		// Set fine_amount via raw SQL (new column, Prisma client not yet regenerated)
+		if (fineAmount >= 0) {
+			await this.prisma.$executeRaw`UPDATE "Dispute" SET fine_amount = ${fineAmount} WHERE id = ${disputeId}`;
+		}
 
-		// Notify parties
+		// ── Process fine: deduct from provider wallet, credit admin ───────────
+		if (fineAmount > 0 && providerUserId) {
+			const adminUser = await this.prisma.user.findFirst({
+				where: { role: 'admin' },
+				select: { id: true },
+			});
+			// Wallet updates via raw SQL (wallet_balance is a new column)
+			await this.prisma.$executeRaw`UPDATE "User" SET wallet_balance = wallet_balance - ${fineAmount} WHERE id = ${providerUserId}`;
+			if (adminUser) {
+				await this.prisma.$executeRaw`UPDATE "User" SET wallet_balance = wallet_balance + ${fineAmount} WHERE id = ${adminUser.id}`;
+			}
+		}
+
+		// ── Notify customer ────────────────────────────────────────────────────
 		const customerUserId = dispute.booking_hotel_id
 			? dispute.bookingHotel?.user_id
 			: dispute.bookingCar?.user_id;
@@ -1625,12 +1725,32 @@ export class AdminService {
 			await this.notificationsService.createNotification(
 				customerUserId,
 				'dispute_resolved',
-				'Dispute Resolved',
-				`Your dispute has been resolved: ${dto.resolution}`,
+				'Your Complaint Has Been Resolved',
+				`Your complaint has been reviewed and resolved: ${dto.resolution}`,
 				{
 					dispute_id: disputeId,
 					booking_type: dispute.booking_hotel_id ? 'hotel' : 'car',
 					booking_id: dispute.booking_hotel_id || dispute.booking_car_id,
+				},
+			);
+		}
+
+		// ── Notify provider about action taken ────────────────────────────────
+		if (providerUserId) {
+			const actionMsg = fineAmount > 0
+				? `You have been fined PKR ${fineAmount} because of: ${dto.resolution}`
+				: `Action has been taken on a complaint filed against you: ${dto.resolution}`;
+
+			await this.notificationsService.createNotification(
+				providerUserId,
+				fineAmount > 0 ? ('dispute_auto_action' as any) : ('dispute_resolved' as any),
+				fineAmount > 0 ? 'Penalty Applied' : 'Complaint Action Taken',
+				actionMsg,
+				{
+					dispute_id: disputeId,
+					booking_type: dispute.booking_hotel_id ? 'hotel' : 'car',
+					booking_id: dispute.booking_hotel_id || dispute.booking_car_id,
+					fine_amount: fineAmount,
 				},
 			);
 		}

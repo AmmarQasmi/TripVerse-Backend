@@ -1,0 +1,4 @@
+-- Baseline migration: all changes already applied directly to DB via raw SQL
+-- BookingType enum, PaymentMethod enum, DisputeCategory variants, Car ride-hailing fields,
+-- CarBooking ride-hailing + cash fields, Dispute fine fields, User wallet_balance, PaymentTransaction payment_method
+-- This file is intentionally empty as the DB already has all these changes.

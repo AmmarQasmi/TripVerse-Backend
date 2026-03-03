@@ -5,9 +5,10 @@ export class ResolveDisputeDto {
 	@IsString()
 	resolution!: string;
 
+	/** Fine amount deducted from driver/hotel wallet and credited to admin wallet */
 	@IsOptional()
 	@IsNumber()
 	@Min(0)
-	refund_amount?: number;
+	fine_amount?: number;
 }
 

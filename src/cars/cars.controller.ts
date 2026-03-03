@@ -240,6 +240,22 @@ export class CarsController {
 	}
 
 	/**
+	 * Collect cash payment (Driver)
+	 * POST /cars/bookings/:id/collect-cash
+	 */
+	@Post('bookings/:id/collect-cash')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	async collectCash(
+		@Param('id', ParseIntPipe) bookingId: number,
+		@Request() req: any,
+		@Body() body: { collected_amount: number },
+	) {
+		const driverId = req.user.id;
+		return this.carsService.collectCash(bookingId, driverId, body.collected_amount);
+	}
+
+	/**
 	 * Get chat messages for a booking
 	 * GET /cars/bookings/:id/chat
 	 */
