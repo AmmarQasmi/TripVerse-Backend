@@ -1,7 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { DriversService } from '../drivers/drivers.service';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
+import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
+import { DisputeRuleEngineService } from './dispute-rule-engine.service';
 import { VerifyDriverDto } from '../drivers/dto/verify-driver.dto';
 import { VerifyHotelManagerDto } from '../hotel-managers/dto/verify-manager.dto';
 import { SuspendDriverDto } from './dto/suspend-driver.dto';
@@ -11,12 +14,19 @@ import { DriverFiltersDto } from './dto/driver-filters.dto';
 import { DisputeFiltersDto } from './dto/dispute-filters.dto';
 import { AccountStatus, DisputeStatus, NotificationType } from '@prisma/client';
 
+/** Set to 'true' to automatically enforce engine actions (warnings, fines, suspensions). */
+const AUTO_ENFORCEMENT_ENABLED = process.env.AUTO_DISPUTE_ENFORCEMENT === 'true';
+
 @Injectable()
 export class AdminService {
+	private readonly logger = new Logger(AdminService.name);
+
 	constructor(
 		private prisma: PrismaService,
 		private driversService: DriversService,
 		private notificationsService: CommonNotificationsService,
+		private cloudinaryService: CloudinaryService,
+		private ruleEngine: DisputeRuleEngineService,
 	) {}
 
 	/**
@@ -1243,44 +1253,78 @@ export class AdminService {
 	}
 
 	/**
-	 * Create a new dispute
-	 * Auto-suspends driver if they reach 5+ pending disputes
+	 * Create a new dispute with automated rule-engine scoring.
+	 * evidenceFiles — optional array of Express.Multer.File (images/videos)
 	 */
-	async createDispute(dto: any) {
-		const { booking_hotel_id, booking_car_id, raised_by, description } = dto;
+	async createDispute(dto: any, evidenceFiles: Express.Multer.File[] = []) {
+		const { booking_hotel_id, booking_car_id, raised_by, description, category, incident_at, reporter_user_id } = dto;
 
-		// Validate that exactly one booking ID is provided
+		// ── 1. Basic input validation ──────────────────────────────────────────
 		if (!booking_hotel_id && !booking_car_id) {
 			throw new BadRequestException('Either booking_hotel_id or booking_car_id must be provided');
 		}
-
 		if (booking_hotel_id && booking_car_id) {
 			throw new BadRequestException('Cannot provide both booking_hotel_id and booking_car_id');
 		}
 
-		// Check if booking exists and get driver ID if it's a car booking
+		// Safety / fraud complaints require at least some evidence
+		if ((category === 'safety' || category === 'fraud') && evidenceFiles.length === 0) {
+			throw new BadRequestException(
+				`Supporting evidence (images/videos) is required for ${category} complaints`,
+			);
+		}
+
+		// ── 2. Resolve booking + provider ─────────────────────────────────────
 		let driverId: number | null = null;
+		let hotelManagerId: number | null = null;
+		let bookingStart: Date | null = null;
+		let bookingEnd: Date | null = null;
 
 		if (booking_car_id) {
 			const carBooking = await this.prisma.carBooking.findUnique({
 				where: { id: booking_car_id },
-				include: {
-					car: {
-						include: {
-							driver: true,
-						},
-					},
-				},
+				include: { car: { include: { driver: true } } },
 			});
-
-			if (!carBooking) {
-				throw new NotFoundException('Car booking not found');
-			}
-
+			if (!carBooking) throw new NotFoundException('Car booking not found');
 			driverId = carBooking.car.driver_id;
+			bookingStart = carBooking.start_date ?? null;
+			bookingEnd = carBooking.end_date ?? null;
+
+			// Time-window check: reject complaints filed >48h after booking ended
+			// (unless safety/fraud — those get an extended 7-day window)
+			if (bookingEnd) {
+				const hoursSinceEnd = (Date.now() - bookingEnd.getTime()) / (1000 * 60 * 60);
+				const windowHours = category === 'safety' || category === 'fraud' ? 168 : 48;
+				if (hoursSinceEnd > windowHours) {
+					throw new BadRequestException(
+						`Complaint window has expired. ${category} complaints must be filed within ${windowHours / 24} day(s) of booking completion.`,
+					);
+				}
+			}
 		}
 
-		// Check if dispute already exists for this booking
+		if (booking_hotel_id) {
+			const hotelBooking = await this.prisma.hotelBooking.findUnique({
+				where: { id: booking_hotel_id },
+				include: { hotel: true },
+			});
+			if (!hotelBooking) throw new NotFoundException('Hotel booking not found');
+			hotelManagerId = hotelBooking.hotel.manager_id ?? null;
+			bookingStart = hotelBooking.check_in ?? null;
+			bookingEnd = hotelBooking.check_out ?? null;
+
+			if (bookingEnd) {
+				const hoursSinceEnd = (Date.now() - bookingEnd.getTime()) / (1000 * 60 * 60);
+				const windowHours = category === 'safety' || category === 'fraud' ? 168 : 48;
+				if (hoursSinceEnd > windowHours) {
+					throw new BadRequestException(
+						`Complaint window has expired. ${category} complaints must be filed within ${windowHours / 24} day(s) of checkout.`,
+					);
+				}
+			}
+		}
+
+		// ── 3. Duplicate detection ─────────────────────────────────────────────
 		const existingDispute = await this.prisma.dispute.findFirst({
 			where: {
 				OR: [
@@ -1289,71 +1333,208 @@ export class AdminService {
 				],
 			},
 		});
-
 		if (existingDispute) {
 			throw new BadRequestException('A dispute already exists for this booking');
 		}
 
-		// Create dispute
+		// ── 4. Upload evidence files to Cloudinary ─────────────────────────────
+		const uploadedAttachments: Array<{
+			file_url: string;
+			cloudinary_public_id: string;
+			file_type: string;
+			file_size: number;
+			content_hash: string;
+			quality_score: number;
+		}> = [];
+
+		for (const file of evidenceFiles) {
+			try {
+				const hash = crypto.createHash('sha256').update(file.buffer).digest('hex');
+				const uploaded = (await this.cloudinaryService.uploadImage(file, 'disputes')) as any;
+
+				// Naive quality score based on file size (can be improved with AI vision)
+				let qualityScore = 1; // low
+				if (file.size > 100_000) qualityScore = 2; // medium
+				if (file.size > 500_000) qualityScore = 3; // high
+
+				uploadedAttachments.push({
+					file_url: uploaded.secure_url,
+					cloudinary_public_id: uploaded.public_id,
+					file_type: file.mimetype,
+					file_size: file.size,
+					content_hash: hash,
+					quality_score: qualityScore,
+				});
+			} catch (err) {
+				this.logger.warn(`Failed to upload evidence file: ${(err as any).message}`);
+			}
+		}
+
+		// ── 5. Create the dispute record ───────────────────────────────────────
 		const dispute = await this.prisma.dispute.create({
 			data: {
 				booking_hotel_id: booking_hotel_id || null,
 				booking_car_id: booking_car_id || null,
 				raised_by,
+				reporter_user_id: reporter_user_id || null,
+				category: category || 'service',
 				description,
+				incident_at: incident_at ? new Date(incident_at) : null,
 				status: DisputeStatus.pending,
+				attachments: {
+					create: uploadedAttachments,
+				},
 			},
 			include: {
-				bookingHotel: {
-					include: { user: true },
-				},
+				bookingHotel: { include: { user: true } },
 				bookingCar: {
 					include: {
 						user: true,
-						car: {
-							include: {
-								driver: {
-									include: { user: true },
-								},
-							},
-						},
+						car: { include: { driver: { include: { user: true } } } },
 					},
+				},
+				attachments: true,
+			},
+		});
+
+		// ── 6. Run rule engine ─────────────────────────────────────────────────
+		const providerId = driverId ?? hotelManagerId;
+		const providerType = driverId ? 'driver' : 'hotel';
+
+		const evaluation = await this.ruleEngine.evaluate({
+			reporterUserId: reporter_user_id || null,
+			incidentAt: incident_at ? new Date(incident_at) : null,
+			bookingStart,
+			bookingEnd,
+			providerId,
+			providerType,
+			newAttachments: uploadedAttachments,
+			category: category || 'service',
+			description,
+		});
+
+		// ── 7. Persist score + flags ───────────────────────────────────────────
+		const flaggedForManualReview =
+			evaluation.recommendedAction === 'manual_review' ||
+			evaluation.flags.length > 0;
+
+		await this.prisma.dispute.update({
+			where: { id: dispute.id },
+			data: {
+				severity_score: evaluation.score,
+				score_breakdown: {
+					breakdown: evaluation.breakdown,
+					reasons: evaluation.reasons,
+					flags: evaluation.flags,
+				},
+				flagged_for_manual_review: flaggedForManualReview,
+				automated_action: evaluation.recommendedAction,
+			},
+		});
+
+		// ── 8. Write audit log ─────────────────────────────────────────────────
+		await this.prisma.disputeAuditLog.create({
+			data: {
+				dispute_id: dispute.id,
+				actor: 'system',
+				action: 'scored',
+				details: {
+					score: evaluation.score,
+					breakdown: evaluation.breakdown,
+					reasons: evaluation.reasons,
+					flags: evaluation.flags,
+					recommendedAction: evaluation.recommendedAction,
 				},
 			},
 		});
 
-		// Check and auto-suspend driver if they have 5+ pending disputes
-		if (driverId) {
+		// ── 9. Apply auto-actions (only when enforcement is enabled) ──────────
+		let autoActionApplied = false;
+
+		if (AUTO_ENFORCEMENT_ENABLED) {
+			switch (evaluation.recommendedAction) {
+				case 'auto_rejected':
+					await this.prisma.dispute.update({
+						where: { id: dispute.id },
+						data: { status: DisputeStatus.rejected, automated_action_applied: true },
+					});
+					autoActionApplied = true;
+					break;
+
+				case 'warning':
+					// send warning notification to provider, keep dispute pending for review
+					if (providerId && driverId) {
+						const driver = await this.prisma.driver.findUnique({ where: { id: driverId } });
+						if (driver) {
+							await this.notificationsService.createNotification(
+								driver.user_id,
+								'dispute_warning' as any,
+								'Complaint Warning',
+								'A complaint has been scored and issued as a formal warning. Please review your service quality.',
+								{ dispute_id: dispute.id },
+							);
+						}
+					}
+					await this.prisma.dispute.update({
+						where: { id: dispute.id },
+						data: { automated_action_applied: true },
+					});
+					autoActionApplied = true;
+					break;
+
+				case 'suspension_or_ban':
+					// Reuse existing driver auto-suspend logic
+					if (driverId) {
+						const wasAutoSuspended = await this.checkAndAutoSuspendDriver(driverId);
+						if (wasAutoSuspended) {
+							this.logger.log(`Driver ${driverId} auto-suspended via rule engine`);
+						}
+					}
+					await this.prisma.dispute.update({
+						where: { id: dispute.id },
+						data: { automated_action_applied: true },
+					});
+					autoActionApplied = true;
+					break;
+
+				default:
+					// 'fine' and 'manual_review' — leave for admin
+					break;
+			}
+		} else if (driverId) {
+			// Keep old behaviour (count-based auto-suspend) when enforcement is off
 			const wasAutoSuspended = await this.checkAndAutoSuspendDriver(driverId);
 			if (wasAutoSuspended) {
-				// Log auto-suspension event (could add to audit log later)
-				console.log(`Driver ${driverId} auto-suspended due to 5+ pending disputes`);
+				this.logger.log(`Driver ${driverId} auto-suspended due to dispute count threshold`);
 			}
 		}
 
-		// Notify admin about new dispute
-		// Get all admin users
+		// ── 10. Notify admins ──────────────────────────────────────────────────
 		const admins = await this.prisma.user.findMany({
 			where: { role: 'admin' },
 			select: { id: true },
 		});
 
-		// Notify all admins
+		const adminTitle = flaggedForManualReview ? '🚩 Dispute Needs Manual Review' : 'New Dispute Raised';
+		const adminMsg = `[${category?.toUpperCase()}] Score: ${evaluation.score} | Action: ${evaluation.recommendedAction} | ${description.substring(0, 80)}`;
+
 		for (const admin of admins) {
 			await this.notificationsService.createNotification(
 				admin.id,
-				'dispute_raised',
-				'New Dispute Raised',
-				`A new dispute has been raised: ${description.substring(0, 100)}...`,
+				flaggedForManualReview ? ('dispute_flagged' as any) : 'dispute_raised',
+				adminTitle,
+				adminMsg,
 				{
 					dispute_id: dispute.id,
 					booking_type: booking_car_id ? 'car' : 'hotel',
 					booking_id: booking_car_id || booking_hotel_id,
+					severity_score: evaluation.score,
+					flags: evaluation.flags,
 				},
 			);
 		}
 
-		// Notify the other party (if client raised, notify driver; if driver raised, notify client)
+		// ── 11. Notify other party ─────────────────────────────────────────────
 		const otherPartyUserId = booking_car_id
 			? dispute.bookingCar?.user_id
 			: dispute.bookingHotel?.user_id;
@@ -1363,7 +1544,7 @@ export class AdminService {
 				otherPartyUserId,
 				'dispute_raised',
 				'Dispute Raised Against You',
-				`A dispute has been raised regarding your booking. Please review and respond.`,
+				`A ${category} complaint has been filed regarding your booking. Our team will review it.`,
 				{
 					dispute_id: dispute.id,
 					booking_type: booking_car_id ? 'car' : 'hotel',
@@ -1373,14 +1554,26 @@ export class AdminService {
 		}
 
 		return {
-			message: 'Dispute created successfully',
+			message: 'Dispute created and evaluated successfully',
 			dispute: {
 				id: dispute.id,
 				booking_type: booking_car_id ? 'car' : 'hotel',
+				category: dispute.category,
 				raised_by: dispute.raised_by,
 				description: dispute.description,
 				status: dispute.status,
+				severity_score: evaluation.score,
+				recommended_action: evaluation.recommendedAction,
+				flagged_for_manual_review: flaggedForManualReview,
+				auto_action_applied: autoActionApplied,
+				evidence_count: uploadedAttachments.length,
 				created_at: dispute.created_at.toISOString(),
+			},
+			scoring: {
+				score: evaluation.score,
+				breakdown: evaluation.breakdown,
+				reasons: evaluation.reasons,
+				flags: evaluation.flags,
 			},
 		};
 	}
