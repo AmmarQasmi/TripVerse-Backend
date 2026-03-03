@@ -529,7 +529,18 @@ export class DriversService {
 			}),
 		]);
 
-		const totalEarnings = parseFloat(earningsResult._sum.driver_earnings?.toString() || '0');
+		const grossEarnings = parseFloat(earningsResult._sum.driver_earnings?.toString() || '0');
+
+		// Deduct fines from resolved disputes against this driver
+		const driverFinesResult = await this.prisma.dispute.aggregate({
+			where: {
+				bookingCar: { car: { driver_id: driver.id } },
+				status: 'resolved',
+			},
+			_sum: { fine_amount: true },
+		});
+		const totalFines = parseFloat(driverFinesResult._sum.fine_amount?.toString() || '0');
+		const totalEarnings = Math.max(0, grossEarnings - totalFines);
 
 		return {
 			verification_status: {
@@ -553,8 +564,8 @@ export class DriversService {
 					make: booking.car.carModel.make,
 					model: booking.car.carModel.model,
 				},
-				start_date: booking.start_date.toISOString().split('T')[0],
-				end_date: booking.end_date.toISOString().split('T')[0],
+				start_date: booking.start_date?.toISOString().split('T')[0] ?? null,
+				end_date: booking.end_date?.toISOString().split('T')[0] ?? null,
 				driver_earnings: parseFloat(booking.driver_earnings.toString()),
 				created_at: booking.created_at.toISOString(),
 			})),
@@ -615,8 +626,20 @@ export class DriversService {
 			orderBy: { completed_at: 'desc' },
 		});
 
+		const grossEarnings = parseFloat(earningsResult._sum.driver_earnings?.toString() || '0');
+
+		// Deduct fines from resolved disputes
+		const finesResult = await this.prisma.dispute.aggregate({
+			where: {
+				bookingCar: { car: { driver_id: driver.id } },
+				status: 'resolved',
+			},
+			_sum: { fine_amount: true },
+		});
+		const totalFines = parseFloat(finesResult._sum.fine_amount?.toString() || '0');
+
 		return {
-			total_earnings: parseFloat(earningsResult._sum.driver_earnings?.toString() || '0'),
+			total_earnings: Math.max(0, grossEarnings - totalFines),
 			total_completed_bookings: earningsResult._count,
 			currency: 'PKR',
 			bookings: bookings.map((booking) => ({

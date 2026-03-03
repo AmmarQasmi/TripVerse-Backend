@@ -7,8 +7,10 @@ import {
 	IsDateString,
 	ValidateIf,
 	MinLength,
+	IsArray,
+	ArrayMinSize,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Type, Transform } from 'class-transformer';
 import { CancellationActor, DisputeCategory } from '@prisma/client';
 
 export class CreateDisputeDto {
@@ -32,14 +34,25 @@ export class CreateDisputeDto {
 	raised_by?: CancellationActor;
 
 	/**
-	 * Complaint category — required for automated scoring.
+	 * Multiple complaint categories selected by the customer.
+	 * Sent as a repeated field (form-data) or array (JSON).
 	 * safety/fraud require supporting evidence.
 	 */
-	@IsNotEmpty()
-	@IsEnum(DisputeCategory)
-	category!: DisputeCategory;
+	@IsArray()
+	@IsEnum(DisputeCategory, { each: true })
+	@ArrayMinSize(1)
+	@Transform(({ value }) => (Array.isArray(value) ? value : [value]))
+	categories!: DisputeCategory[];
 
-	/** Complaint description — minimum 20 characters for meaningful context */
+	/**
+	 * Primary category (derived from categories array by service).
+	 * Kept for backward-compatibility — do not send from frontend.
+	 */
+	@IsOptional()
+	@IsEnum(DisputeCategory)
+	category?: DisputeCategory;
+
+	/** Complaint description — auto-generated from selected categories on the frontend */
 	@IsNotEmpty()
 	@IsString()
 	@MinLength(20)
@@ -55,6 +68,14 @@ export class CreateDisputeDto {
 	@IsInt()
 	@Type(() => Number)
 	reporter_user_id?: number;
+
+	/**
+	 * Handled by multer via FileFieldsInterceptor — actual files are in req.files.evidence.
+	 * This field declaration exists solely to prevent forbidNonWhitelisted from rejecting
+	 * the multipart body when the field name appears before multer fully extracts it.
+	 */
+	@IsOptional()
+	evidence?: any;
 }
 
 
