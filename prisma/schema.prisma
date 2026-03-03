@@ -67,6 +67,14 @@ enum DisputeStatus {
   rejected
 }
 
+enum DisputeCategory {
+  service      // rude driver, poor hotel staff
+  pricing      // overcharging
+  cleanliness  // dirty room or vehicle
+  safety       // dangerous driving or unsafe accommodation
+  fraud        // misleading listing or false service
+}
+
 enum CancellationActor {
   client
   driver
@@ -128,6 +136,8 @@ enum NotificationType {
   hotel_booking_payment_received
   hotel_review_received
   chat_message
+  dispute_auto_action
+  dispute_flagged
 }
 
 // AI Chatbot Enums
@@ -210,6 +220,8 @@ model User {
   generatedItineraries          GeneratedItinerary[]
   reviewedDocuments             DriverDocument[]       @relation("DocumentReviewer")
   reviewedHotelManagerDocuments HotelManagerDocument[] @relation("HotelManagerDocumentReviewer")
+  reportedDisputes              Dispute[]              @relation("DisputeReporter")
+  false_complaint_count         Int                    @default(0)
 
   @@index([city_id])
   @@index([status])
@@ -601,32 +613,67 @@ model MonumentExportLog {
 }
 
 model Dispute {
-  id               Int               @id @default(autoincrement())
-  booking_hotel_id Int?              @unique
-  booking_car_id   Int?              @unique
-  raised_by        CancellationActor
-  description      String
-  status           DisputeStatus
-  created_at       DateTime          @default(now())
-  resolved_at      DateTime?
+  id                          Int               @id @default(autoincrement())
+  booking_hotel_id            Int?              @unique
+  booking_car_id              Int?              @unique
+  raised_by                   CancellationActor
+  reporter_user_id            Int?
+  category                    DisputeCategory   @default(service)
+  description                 String
+  incident_at                 DateTime?
+  status                      DisputeStatus
+  severity_score              Int               @default(0)
+  score_breakdown             Json?             // detailed rules + reasons
+  flagged_for_manual_review   Boolean           @default(false)
+  automated_action            String?           // 'rejected'|'warning'|'fine'|'suspension'|'ban'
+  automated_action_applied    Boolean           @default(false)
+  resolution                  String?
+  created_at                  DateTime          @default(now())
+  resolved_at                 DateTime?
 
   bookingHotel HotelBooking?       @relation(fields: [booking_hotel_id], references: [id], onDelete: Cascade)
   bookingCar   CarBooking?         @relation(fields: [booking_car_id], references: [id], onDelete: Cascade)
+  reporter     User?               @relation("DisputeReporter", fields: [reporter_user_id], references: [id], onDelete: SetNull)
   attachments  DisputeAttachment[]
+  auditLogs    DisputeAuditLog[]
 
   @@index([status])
+  @@index([category])
+  @@index([severity_score])
+  @@index([flagged_for_manual_review])
+  @@index([reporter_user_id])
 }
 
 model DisputeAttachment {
-  id          Int      @id @default(autoincrement())
-  dispute_id  Int
-  file_url    String
-  file_type   String
-  uploaded_at DateTime @default(now())
+  id                   Int      @id @default(autoincrement())
+  dispute_id           Int
+  file_url             String
+  cloudinary_public_id String?
+  file_type            String
+  file_size            Int?     // bytes
+  content_hash         String?  // SHA-256 of file, for duplicate detection
+  quality_score        Int      @default(0) // 0=unknown,1=low,2=medium,3=high
+  uploaded_at          DateTime @default(now())
 
   dispute Dispute @relation(fields: [dispute_id], references: [id], onDelete: Cascade)
 
   @@index([dispute_id])
+  @@index([content_hash])
+}
+
+model DisputeAuditLog {
+  id          Int      @id @default(autoincrement())
+  dispute_id  Int
+  actor       String   // 'system'|'admin'|userid
+  action      String   // e.g. 'scored', 'auto_rejected', 'manual_resolved'
+  details     Json?    // score breakdown, reasons, thresholds
+  created_at  DateTime @default(now())
+
+  dispute Dispute @relation(fields: [dispute_id], references: [id], onDelete: Cascade)
+
+  @@index([dispute_id])
+  @@index([created_at])
+  @@map("dispute_audit_logs")
 }
 
 model DriverDisciplinaryAction {

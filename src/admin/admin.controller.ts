@@ -10,7 +10,11 @@ import {
 	Body,
 	UseGuards,
 	ParseIntPipe,
+	UseInterceptors,
+	UploadedFiles,
 } from '@nestjs/common';
+import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import { memoryStorage } from 'multer';
 import { AdminService } from './admin.service';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -157,24 +161,32 @@ export class AdminController {
 	}
 
 	/**
-	 * Create a new dispute
-	 * POST /admin/disputes
-	 * Can be called by client, driver, or admin
+	 * Create a new dispute with optional evidence attachments
+	 * POST /admin/disputes  (multipart/form-data)
+	 * Can only be called by clients (customers)
 	 */
 	@Post('disputes')
 	@UseGuards(JwtAuthGuard)
-	async createDispute(@Body() dto: CreateDisputeDto, @CurrentUser() user: any) {
-		// Set raised_by based on user role if not provided
-		if (!dto.raised_by) {
-			if (user.role === 'client') {
-				dto.raised_by = 'client';
-			} else if (user.role === 'driver') {
-				dto.raised_by = 'driver';
-			} else {
-				dto.raised_by = 'admin';
-			}
-		}
-		return this.adminService.createDispute(dto);
+	@UseInterceptors(
+		FileFieldsInterceptor([{ name: 'evidence', maxCount: 5 }], {
+			storage: memoryStorage(),
+			limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB per file
+			fileFilter: (_req, file, cb) => {
+				const allowed = /image\/(jpeg|png|webp|gif)|video\/(mp4|quicktime)/;
+				cb(null, allowed.test(file.mimetype));
+			},
+		}),
+	)
+	async createDispute(
+		@Body() dto: CreateDisputeDto,
+		@UploadedFiles() files: { evidence?: Express.Multer.File[] },
+		@CurrentUser() user: any,
+	) {
+		// Enforce: only clients may raise disputes
+		dto.raised_by = 'client';
+		dto.reporter_user_id = user.id;
+		const evidenceFiles = files?.evidence ?? [];
+		return this.adminService.createDispute(dto, evidenceFiles);
 	}
 
 	/**
