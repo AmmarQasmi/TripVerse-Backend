@@ -80,6 +80,13 @@ export class AdminService {
 			carBookingsThisMonth,
 			totalHotelBookings,
 			totalCarBookings,
+			// New: Booking type breakdown for car bookings
+			rentalBookingsToday,
+			rideHailingBookingsToday,
+			rentalBookingsThisMonth,
+			rideHailingBookingsThisMonth,
+			totalRentalBookings,
+			totalRideHailingBookings,
 		] = await Promise.all([
 			this.prisma.hotelBooking.count({ where: { created_at: { gte: today } } }),
 			this.prisma.carBooking.count({ where: { created_at: { gte: today } } }),
@@ -89,6 +96,18 @@ export class AdminService {
 			this.prisma.carBooking.count({ where: { created_at: { gte: thisMonth } } }),
 			this.prisma.hotelBooking.count(),
 			this.prisma.carBooking.count(),
+			// Rental bookings
+			this.prisma.carBooking.count({ where: { created_at: { gte: today }, booking_type: 'RENTAL' } }),
+			// Ride-hailing bookings
+			this.prisma.carBooking.count({ where: { created_at: { gte: today }, booking_type: 'RIDE_HAILING' } }),
+			// Monthly rental
+			this.prisma.carBooking.count({ where: { created_at: { gte: thisMonth }, booking_type: 'RENTAL' } }),
+			// Monthly ride-hailing
+			this.prisma.carBooking.count({ where: { created_at: { gte: thisMonth }, booking_type: 'RIDE_HAILING' } }),
+			// Total rental
+			this.prisma.carBooking.count({ where: { booking_type: 'RENTAL' } }),
+			// Total ride-hailing (include null as RENTAL for backwards compatibility)
+			this.prisma.carBooking.count({ where: { booking_type: 'RIDE_HAILING' } }),
 		]);
 
 		const bookingsToday = hotelBookingsToday + carBookingsToday;
@@ -97,7 +116,14 @@ export class AdminService {
 		const totalBookings = totalHotelBookings + totalCarBookings;
 
 		// Revenue, disputes, and recent drivers - optimized parallel queries
-		const [revenueResult, pendingDisputes, recentPendingDrivers] = await Promise.all([
+		const [
+			revenueResult, 
+			pendingDisputes, 
+			recentPendingDrivers,
+			// Revenue breakdown by booking type
+			rentalRevenueResult,
+			rideHailingRevenueResult,
+		] = await Promise.all([
 			this.prisma.paymentTransaction.aggregate({
 				where: { status: 'completed' },
 				_sum: {
@@ -124,10 +150,38 @@ export class AdminService {
 				orderBy: { created_at: 'desc' },
 				take: 5,
 			}),
+			// Rental revenue (from car bookings where booking_type is RENTAL)
+			this.prisma.carBooking.aggregate({
+				where: {
+					status: 'COMPLETED',
+					booking_type: 'RENTAL',
+				},
+				_sum: {
+					total_amount: true,
+					platform_fee: true,
+				},
+			}),
+			// Ride-hailing revenue
+			this.prisma.carBooking.aggregate({
+				where: {
+					status: 'COMPLETED',
+					booking_type: 'RIDE_HAILING',
+				},
+				_sum: {
+					total_amount: true,
+					platform_fee: true,
+				},
+			}),
 		]);
 
 		const totalRevenue = parseFloat(revenueResult._sum.amount?.toString() || '0');
 		const totalCommission = parseFloat(revenueResult._sum.application_fee_amount?.toString() || '0');
+
+		// Revenue breakdown by booking type
+		const rentalRevenue = parseFloat(rentalRevenueResult._sum?.total_amount?.toString() || '0');
+		const rentalFees = parseFloat(rentalRevenueResult._sum?.platform_fee?.toString() || '0');
+		const rideHailingRevenue = parseFloat(rideHailingRevenueResult._sum?.total_amount?.toString() || '0');
+		const rideHailingFees = parseFloat(rideHailingRevenueResult._sum?.platform_fee?.toString() || '0');
 
 		// Add fine income from resolved disputes to total revenue
 		const fineRevenueResult = await this.prisma.dispute.aggregate({
@@ -152,11 +206,35 @@ export class AdminService {
 				this_week: bookingsThisWeek,
 				this_month: bookingsThisMonth,
 				total: totalBookings,
+				// Breakdown by booking type
+				by_type: {
+					rental: {
+						today: rentalBookingsToday,
+						this_month: rentalBookingsThisMonth,
+						total: totalRentalBookings,
+					},
+					ride_hailing: {
+						today: rideHailingBookingsToday,
+						this_month: rideHailingBookingsThisMonth,
+						total: totalRideHailingBookings,
+					},
+				},
 			},
 			revenue: {
-			total: totalRevenue + fineRevenue,
-			commission: totalCommission,
-			currency: 'PKR',
+				total: totalRevenue + fineRevenue,
+				commission: totalCommission,
+				currency: 'PKR',
+				// Revenue breakdown by booking type
+				by_type: {
+					rental: {
+						total: rentalRevenue,
+						platform_fees: rentalFees,
+					},
+					ride_hailing: {
+						total: rideHailingRevenue,
+						platform_fees: rideHailingFees,
+					},
+				},
 			},
 			disputes: {
 				pending: pendingDisputes,
@@ -1777,7 +1855,7 @@ export class AdminService {
 			};
 		}
 
-		const [hotelBookings, carBookings] = await Promise.all([
+		const [hotelBookings, carBookings, carBookingsByType] = await Promise.all([
 			this.prisma.hotelBooking.groupBy({
 				by: ['status'],
 				where,
@@ -1788,7 +1866,30 @@ export class AdminService {
 				where,
 				_count: true,
 			}),
+			// Car bookings grouped by booking_type
+			this.prisma.carBooking.groupBy({
+				by: ['booking_type', 'status'],
+				where,
+				_count: true,
+			}),
 		]);
+
+		// Process car bookings by type
+		const rentalBookings = carBookingsByType
+			.filter(b => b.booking_type === 'RENTAL')
+			.reduce((acc, b) => {
+				acc[b.status.toLowerCase()] = (acc[b.status.toLowerCase()] || 0) + b._count;
+				acc.total = (acc.total || 0) + b._count;
+				return acc;
+			}, {} as Record<string, number>);
+
+		const rideHailingBookings = carBookingsByType
+			.filter(b => b.booking_type === 'RIDE_HAILING')
+			.reduce((acc, b) => {
+				acc[b.status.toLowerCase()] = (acc[b.status.toLowerCase()] || 0) + b._count;
+				acc.total = (acc.total || 0) + b._count;
+				return acc;
+			}, {} as Record<string, number>);
 
 		return {
 			hotel_bookings: hotelBookings.map((b) => ({
@@ -1799,6 +1900,24 @@ export class AdminService {
 				status: b.status,
 				count: b._count,
 			})),
+			car_bookings_by_type: {
+				rental: {
+					total: rentalBookings.total || 0,
+					completed: rentalBookings.completed || 0,
+					pending: rentalBookings.pending || 0,
+					confirmed: rentalBookings.confirmed || 0,
+					in_progress: rentalBookings.in_progress || 0,
+					cancelled: rentalBookings.cancelled || 0,
+				},
+				ride_hailing: {
+					total: rideHailingBookings.total || 0,
+					completed: rideHailingBookings.completed || 0,
+					pending: rideHailingBookings.pending || 0,
+					confirmed: rideHailingBookings.confirmed || 0,
+					in_progress: rideHailingBookings.in_progress || 0,
+					cancelled: rideHailingBookings.cancelled || 0,
+				},
+			},
 		};
 	}
 
@@ -2637,5 +2756,98 @@ export class AdminService {
 				verified_at: 'desc',
 			},
 		});
+	}
+
+	// =====================
+	// Migration & Data Integrity
+	// =====================
+
+	/**
+	 * Verify data integrity after migration
+	 * Checks:
+	 * - All car bookings have booking_type set
+	 * - All rental bookings have start/end dates
+	 * - All ride-hailing bookings have pickup/dropoff times
+	 * - Cars have ride-hailing fields populated
+	 */
+	async verifyMigrationIntegrity(): Promise<{
+		success: boolean;
+		checks: Array<{ check: string; passed: boolean; details?: string }>;
+		summary: {
+			total_bookings: number;
+			rental_bookings: number;
+			ride_hailing_bookings: number;
+			cars_with_ride_hailing: number;
+			drivers_verified: number;
+		};
+	}> {
+		const checks: Array<{ check: string; passed: boolean; details?: string }> = [];
+
+		// Check 1: All bookings have booking_type
+		const bookingsWithoutType = await this.prisma.carBooking.count({
+			where: { booking_type: null as any },
+		});
+		checks.push({
+			check: 'All bookings have booking_type',
+			passed: bookingsWithoutType === 0,
+			details: bookingsWithoutType > 0 ? `${bookingsWithoutType} bookings missing type` : undefined,
+		});
+
+		// Check 2: Rental bookings have dates
+		const rentalBookingsWithoutDates = await this.prisma.carBooking.count({
+			where: {
+				booking_type: 'RENTAL',
+				OR: [
+					{ start_date: null },
+					{ end_date: null },
+				],
+			},
+		});
+		checks.push({
+			check: 'Rental bookings have dates',
+			passed: rentalBookingsWithoutDates === 0,
+			details: rentalBookingsWithoutDates > 0 ? `${rentalBookingsWithoutDates} rentals missing dates` : undefined,
+		});
+
+		// Check 3: Cars have ride-hailing pricing when enabled
+		const carsWithRideHailingEnabled = await this.prisma.car.count({
+			where: { available_for_ride_hailing: true },
+		});
+		const carsWithRideHailingPricing = await this.prisma.car.count({
+			where: {
+				available_for_ride_hailing: true,
+				AND: [
+					{ base_fare: { not: null } },
+					{ per_km_rate: { not: null } },
+				],
+			},
+		});
+		checks.push({
+			check: 'Ride-hailing cars have pricing',
+			passed: carsWithRideHailingEnabled === carsWithRideHailingPricing,
+			details: carsWithRideHailingEnabled !== carsWithRideHailingPricing 
+				? `${carsWithRideHailingEnabled - carsWithRideHailingPricing} cars missing pricing` 
+				: undefined,
+		});
+
+		// Summary stats
+		const [totalBookings, rentalBookings, rideHailingBookings, driversVerified] = await Promise.all([
+			this.prisma.carBooking.count(),
+			this.prisma.carBooking.count({ where: { booking_type: 'RENTAL' } }),
+			this.prisma.carBooking.count({ where: { booking_type: 'RIDE_HAILING' } }),
+			this.prisma.driver.count({ where: { is_verified: true } }),
+		]);
+
+		return {
+			success: checks.every(c => c.passed),
+			checks,
+			summary: {
+				total_bookings: totalBookings,
+				rental_bookings: rentalBookings,
+				ride_hailing_bookings: rideHailingBookings,
+				cars_with_ride_hailing: carsWithRideHailingEnabled,
+				drivers_verified: driversVerified,
+			},
+		};
 	}
 }

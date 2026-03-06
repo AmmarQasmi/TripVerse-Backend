@@ -15,8 +15,8 @@
     "strict": true,
     "moduleResolution": "node",
     "lib": ["es2019"],
-    "types": ["node"]
+    "types": ["node", "jest"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "test", "**/*spec.ts"]
+  "exclude": ["node_modules", "dist", "test"]
 }

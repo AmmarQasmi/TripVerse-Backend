@@ -342,5 +342,50 @@ export class NotificationsService {
 			// Don't throw - this is a non-critical operation
 		}
 	}
+
+	/**
+	 * Notify client that their ride-hailing request has expired (no driver response)
+	 */
+	async notifyRideRequestExpired(
+		clientUserId: number,
+		bookingId: number,
+		driverName: string,
+		pickupLocation: string,
+	): Promise<void> {
+		await this.createNotification(
+			clientUserId,
+			'booking_rejected', // Reuse existing notification type
+			'Ride Request Expired',
+			`Your ride request to ${pickupLocation} has expired. ${driverName} did not respond in time. You can try scheduling a pickup for later or browse other available drivers.`,
+			{ 
+				booking_id: bookingId, 
+				booking_type: 'car',
+				is_ride_hailing_timeout: true,
+				suggestions: ['schedule_pickup', 'browse_drivers']
+			},
+		);
+	}
+
+	/**
+	 * Notify client with suggestion to schedule pickup or find another driver
+	 */
+	async notifyRideAlternatives(
+		clientUserId: number,
+		bookingId: number,
+		originalDestination: string,
+	): Promise<void> {
+		await this.createNotification(
+			clientUserId,
+			'trip_completed', // Reuse existing type for system suggestions
+			'Looking for a Ride?',
+			`Couldn't find a driver for your trip to ${originalDestination}? Try scheduling a pickup for a specific time or browse more drivers in your area.`,
+			{ 
+				booking_id: bookingId,
+				booking_type: 'car',
+				is_suggestion: true,
+				action_type: 'ride_alternatives'
+			},
+		);
+	}
 }
 

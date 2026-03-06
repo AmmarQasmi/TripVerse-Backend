@@ -12,6 +12,7 @@ import {
 	UploadedFile,
 	BadRequestException,
 	ParseIntPipe,
+	Patch,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { DriversService } from './drivers.service';
@@ -31,6 +32,31 @@ export class DriversController {
 	@Get('health')
 	health() {
 		return { ok: true, service: 'drivers' };
+	}
+
+	/**
+	 * Switch driver mode (offline/rental/ride_hailing)
+	 * POST /drivers/mode/switch
+	 */
+	@Post('mode/switch')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	async switchMode(
+		@CurrentUser() user: any,
+		@Body() body: { mode: 'offline' | 'ride_hailing' | 'rental' },
+	) {
+		return this.driversService.switchMode(user.id, body.mode);
+	}
+
+	/**
+	 * Get current driver mode and availability status
+	 * GET /drivers/mode/status
+	 */
+	@Get('mode/status')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	async getModeStatus(@CurrentUser() user: any) {
+		return this.driversService.getModeStatus(user.id);
 	}
 
 	// Driver: Get own profile with verification status

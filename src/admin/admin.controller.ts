@@ -51,6 +51,17 @@ export class AdminController {
 	}
 
 	/**
+	 * Verify migration integrity and data consistency
+	 * GET /admin/migration/verify
+	 */
+	@Get('migration/verify')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.admin)
+	async verifyMigration() {
+		return this.adminService.verifyMigrationIntegrity();
+	}
+
+	/**
 	 * Get all drivers with filters
 	 * GET /admin/drivers?page=1&limit=20&is_verified=true&city_id=1&status=pending
 	 */
