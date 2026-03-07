@@ -3,11 +3,60 @@ import { ConfigService } from '@nestjs/config';
 import { CloudinaryService } from '../common/cloudinary/cloudinary.service';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
 import { AdminService } from '../admin/admin.service';
-import { GooglePlacesService } from '../common/services/google-places.service';
+import { GooglePlacesService, CityInfo } from '../common/services/google-places.service';
 import { WeatherService } from '../weather/weather.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ChatGateway } from './chat.gateway';
+import { BookingType, Prisma } from '@prisma/client';
 import axios from 'axios';
+
+// =====================
+// Types for Pricing Engine
+// =====================
+
+interface PricingBreakdown {
+	base_price: number;
+	distance_price: number;
+	time_price?: number;
+	surge_multiplier?: number;
+	subtotal: number;
+	total_amount: number;
+	driver_earnings: number;
+	platform_fee: number;
+	platform_fee_percentage: number;
+}
+
+interface DetectedCities {
+	pickup_city_id?: number;
+	pickup_city_name?: string;
+	dropoff_city_id?: number;
+	dropoff_city_name?: string;
+}
+
+interface RentalPriceResult {
+	booking_type: 'RENTAL';
+	trip_duration_days: number;
+	estimated_distance: number;
+	pricing_breakdown: PricingBreakdown;
+	detected_cities: DetectedCities;
+}
+
+interface RideHailingPriceResult {
+	booking_type: 'RIDE_HAILING';
+	estimated_duration: number;
+	estimated_distance: number;
+	surge_multiplier: number;
+	pricing_breakdown: PricingBreakdown;
+	detected_cities: DetectedCities;
+}
+
+type PriceCalculationResult = RentalPriceResult | RideHailingPriceResult;
+
+// =====================
+// Edge Case Constants
+// =====================
+const MINIMUM_DISTANCE_KM = 0.5; // 500 meters minimum for any trip
+const MAX_RIDE_HAILING_DISTANCE_KM = 100; // Max distance for ride-hailing, suggest rental beyond
 
 @Injectable()
 export class CarsService {
@@ -37,6 +86,11 @@ export class CarsService {
 	/**
 	 * Search available cars with filters
 	 * Only shows cars from verified drivers
+	 * 
+	 * booking_type filter:
+	 * - RENTAL: available_for_rental = true AND no conflicting date bookings
+	 * - RIDE_HAILING: available_for_ride_hailing = true AND current_mode = 'ride_hailing' AND no active rides
+	 * - If not specified, returns all available cars
 	 */
 	async searchCars(query: any = {}) {
 		const {
@@ -49,6 +103,7 @@ export class CarsService {
 			fuel_type,
 			min_price,
 			max_price,
+			booking_type,
 			page = 1,
 			limit = 20,
 		} = query;
@@ -68,6 +123,14 @@ export class CarsService {
 				},
 			},
 		};
+
+		// Apply booking_type filter
+		if (booking_type === 'RENTAL') {
+			where.available_for_rental = true;
+		} else if (booking_type === 'RIDE_HAILING') {
+			where.available_for_ride_hailing = true;
+			where.current_mode = 'ride_hailing'; // Only show cars with drivers currently online for ride-hailing
+		}
 
 		// Filter by city ID (exact match)
 		if (city_id) {
@@ -137,21 +200,29 @@ export class CarsService {
 					take: 1, // Primary image only
 				},
 				carBookings: {
-					where: {
+					where: booking_type === 'RIDE_HAILING' ? {
+						// For RIDE_HAILING: Check for active rides only
+						booking_type: 'RIDE_HAILING',
+						status: 'IN_PROGRESS',
+					} : startDate && endDate ? {
+						// For RENTAL: Check for date conflicts
 						status: {
 							in: ['PENDING_DRIVER_ACCEPTANCE', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS'],
 						},
-						// Check for date conflicts
-						...(startDate && endDate && {
-							OR: [
-								{
-									AND: [
-										{ start_date: { lte: endDate } },
-										{ end_date: { gte: startDate } },
-									],
-								},
-							],
-						}),
+						booking_type: 'RENTAL',
+						OR: [
+							{
+								AND: [
+									{ start_date: { lte: endDate } },
+									{ end_date: { gte: startDate } },
+								],
+							},
+						],
+					} : {
+						// Default: check for any active bookings
+						status: {
+							in: ['PENDING_DRIVER_ACCEPTANCE', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS'],
+						},
 					},
 				},
 			},
@@ -163,8 +234,13 @@ export class CarsService {
 			take: limit,
 		});
 
-		// Filter out cars with conflicting bookings
+		// Filter out cars with conflicting bookings or active rides
 		const filteredCars = availableCars.filter((car) => {
+			// For RIDE_HAILING: exclude cars with active rides
+			if (booking_type === 'RIDE_HAILING') {
+				return car.carBookings.length === 0;
+			}
+			// For RENTAL: exclude cars with date conflicts
 			if (startDate && endDate) {
 				return car.carBookings.length === 0;
 			}
@@ -193,6 +269,18 @@ export class CarsService {
 			pricing: {
 				base_price_per_day: parseFloat(car.base_price_per_day.toString()),
 				distance_rate_per_km: parseFloat(car.distance_rate_per_km.toString()),
+				// Ride-hailing pricing (if available)
+				...(car.available_for_ride_hailing && {
+					base_fare: car.base_fare ? parseFloat(car.base_fare.toString()) : null,
+					per_km_rate: car.per_km_rate ? parseFloat(car.per_km_rate.toString()) : null,
+					per_minute_rate: car.per_minute_rate ? parseFloat(car.per_minute_rate.toString()) : null,
+					minimum_fare: car.minimum_fare ? parseFloat(car.minimum_fare.toString()) : null,
+				}),
+			},
+			availability: {
+				available_for_rental: car.available_for_rental,
+				available_for_ride_hailing: car.available_for_ride_hailing,
+				current_mode: car.current_mode,
 			},
 			images: car.images.map((img) => img.image_url),
 			createdAt: car.created_at.toISOString(),
@@ -319,18 +407,82 @@ export class CarsService {
 	}
 
 	/**
-	 * Get unavailable dates for a car based on active bookings
+	 * Get unavailable dates or real-time availability status for a car
+	 * 
+	 * @param carId - Car ID
+	 * @param mode - 'rental' returns date ranges, 'ride_hailing' returns real-time status
 	 */
-	async getUnavailableDates(carId: number) {
-		const car = await this.prisma.car.findUnique({ where: { id: carId } });
+	async getUnavailableDates(carId: number, mode?: 'rental' | 'ride_hailing') {
+		const car = await this.prisma.car.findUnique({
+			where: { id: carId },
+			include: {
+				driver: {
+					include: {
+						user: {
+							select: { full_name: true },
+						},
+					},
+				},
+			},
+		});
 		if (!car) throw new NotFoundException('Car not found');
 
+		// For ride-hailing mode: return real-time availability status
+		if (mode === 'ride_hailing') {
+			// Check if car is in ride-hailing mode
+			const isInRideHailingMode = car.current_mode === 'ride_hailing';
+			const isAvailableForRideHailing = car.available_for_ride_hailing;
+
+			// Check for active ride
+			const activeRide = await this.prisma.carBooking.findFirst({
+				where: {
+					car_id: carId,
+					booking_type: 'RIDE_HAILING',
+					status: 'IN_PROGRESS',
+				},
+				select: {
+					id: true,
+					pickup_location: true,
+					dropoff_location: true,
+					created_at: true,
+				},
+			});
+
+			// Check for pending requests
+			const pendingRequests = await this.prisma.carBooking.count({
+				where: {
+					car_id: carId,
+					booking_type: 'RIDE_HAILING',
+					status: 'PENDING_DRIVER_ACCEPTANCE',
+				},
+			});
+
+			return {
+				car_id: carId,
+				mode: 'ride_hailing',
+				driver_name: car.driver.user.full_name,
+				is_available: isInRideHailingMode && isAvailableForRideHailing && !activeRide,
+				current_mode: car.current_mode,
+				available_for_ride_hailing: isAvailableForRideHailing,
+				has_active_ride: !!activeRide,
+				active_ride: activeRide ? {
+					id: activeRide.id,
+					pickup: activeRide.pickup_location,
+					dropoff: activeRide.dropoff_location,
+					started_at: activeRide.created_at.toISOString(),
+				} : null,
+				pending_requests: pendingRequests,
+			};
+		}
+
+		// Default / Rental mode: return unavailable date ranges
 		const activeBookings = await this.prisma.carBooking.findMany({
 			where: {
 				car_id: carId,
 				status: {
 					in: ['PENDING_DRIVER_ACCEPTANCE', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS'],
 				},
+				booking_type: 'RENTAL',
 				end_date: { gte: new Date() },
 			},
 			select: {
@@ -355,6 +507,7 @@ export class CarsService {
 
 		return {
 			car_id: carId,
+			mode: 'rental',
 			unavailable_dates: [...new Set(unavailableDates)].sort(),
 			booking_ranges: activeBookings.map(b => ({
 				start_date: b.start_date?.toISOString().split('T')[0] ?? null,
@@ -365,7 +518,143 @@ export class CarsService {
 	}
 
 	/**
-	 * Calculate price for a specific car and route
+	 * Calculate price for a specific car and route (v2 - supports both booking types)
+	 * 
+	 * @param carId - Car ID
+	 * @param dto - CalculatePriceDto with pickup, dropoff, and options
+	 */
+	async calculatePriceV2(
+		carId: number,
+		dto: {
+			pickup_location: string;
+			dropoff_location: string;
+			booking_type?: 'RENTAL' | 'RIDE_HAILING';
+			start_date?: string;
+			end_date?: string;
+			scheduled_pickup?: string;
+			estimated_distance?: number;
+		},
+	): Promise<any> {
+		const { pickup_location: pickupLocation, dropoff_location: dropoffLocation } = dto;
+		const options = {
+			bookingType: dto.booking_type,
+			startDate: dto.start_date,
+			endDate: dto.end_date,
+			scheduledPickup: dto.scheduled_pickup,
+			estimatedDistance: dto.estimated_distance,
+		};
+
+		const car = await this.prisma.car.findUnique({
+			where: { id: carId },
+			include: {
+				driver: {
+					include: {
+						user: true,
+					},
+				},
+			},
+		});
+
+		if (!car || !car.is_active || !car.driver.is_verified) {
+			throw new NotFoundException('Car not found or driver not verified');
+		}
+
+		// Auto-detect booking type if not provided
+		let bookingType: BookingType;
+		let detectedBookingType: BookingType;
+		let detectedCities: DetectedCities;
+
+		// Always detect to get cities and auto-suggested type
+		const detection = await this.detectBookingType(pickupLocation, dropoffLocation);
+		detectedCities = detection.detectedCities;
+		detectedBookingType = detection.bookingType;
+
+		if (options.bookingType) {
+			// User explicitly specified a type - use it
+			bookingType = options.bookingType === 'RIDE_HAILING' ? BookingType.RIDE_HAILING : BookingType.RENTAL;
+		} else {
+			// Use auto-detected type
+			bookingType = detectedBookingType;
+		}
+
+		// Get distance (and duration for ride-hailing)
+		const distanceAndDuration = await this.estimateDistanceAndDuration(pickupLocation, dropoffLocation);
+		let distance = options.estimatedDistance || distanceAndDuration.distance;
+		const duration = distanceAndDuration.duration;
+
+		// Edge case handling for distance
+		// 1. Same pickup/dropoff (0 or very small distance) - enforce minimum distance
+		if (distance < MINIMUM_DISTANCE_KM) {
+			this.logger.warn(`Very short distance detected: ${distance} km. Enforcing minimum.`);
+			distance = MINIMUM_DISTANCE_KM;
+		}
+
+		// 2. Very long intercity distances - cap at reasonable max (ride-hailing only)
+		if (bookingType === BookingType.RIDE_HAILING && distance > MAX_RIDE_HAILING_DISTANCE_KM) {
+			this.logger.warn(`Distance ${distance} km exceeds ride-hailing max. Suggesting rental.`);
+			// Don't error, but we'll suggest rental in the response
+		}
+
+		// Calculate based on booking type
+		if (bookingType === BookingType.RIDE_HAILING) {
+			// For ride-hailing: use scheduled pickup or current time
+			const scheduledPickup = options.scheduledPickup ? new Date(options.scheduledPickup) : new Date();
+			
+			// Estimate duration if not from API: distance_km ÷ 40 (average city speed) × 60 minutes
+			const estimatedDuration = duration || Math.ceil((distance / 40) * 60);
+			
+			const pricing = this.calculateRideHailingPrice(car, distance, estimatedDuration, scheduledPickup);
+
+			// Add warning for very long rides
+			const distanceWarning = distance > MAX_RIDE_HAILING_DISTANCE_KM
+				? `Distance of ${Math.round(distance)} km is quite long for ride-hailing. Consider a rental booking for better pricing.`
+				: undefined;
+
+			return {
+				car_id: car.id,
+				driver_id: car.driver.user.id,
+				pickup_location: pickupLocation,
+				dropoff_location: dropoffLocation,
+				booking_type: 'RIDE_HAILING',
+				detected_booking_type: detectedBookingType === BookingType.RIDE_HAILING ? 'RIDE_HAILING' : 'RENTAL',
+				estimated_distance: distance,
+				estimated_duration: estimatedDuration,
+				surge_multiplier: pricing.surge_multiplier,
+				scheduled_pickup: scheduledPickup.toISOString(),
+				detected_cities: detectedCities,
+				pricing_breakdown: pricing,
+				...(distanceWarning && { distance_warning: distanceWarning }),
+			};
+		} else {
+			// For rentals: require start and end dates
+			if (!options.startDate || !options.endDate) {
+				throw new BadRequestException('start_date and end_date are required for rental bookings');
+			}
+
+			const startDate = new Date(options.startDate);
+			const endDate = new Date(options.endDate);
+			const days = Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
+
+			const pricing = this.calculateRentalPrice(car, startDate, endDate, distance);
+
+			return {
+				car_id: car.id,
+				driver_id: car.driver.user.id,
+				pickup_location: pickupLocation,
+				dropoff_location: dropoffLocation,
+				booking_type: 'RENTAL',
+				detected_booking_type: detectedBookingType === BookingType.RIDE_HAILING ? 'RIDE_HAILING' : 'RENTAL',
+				estimated_distance: distance,
+				trip_duration_days: days,
+				detected_cities: detectedCities,
+				pricing_breakdown: pricing,
+			};
+		}
+	}
+
+	/**
+	 * Calculate price for a specific car and route (backward compatible - assumes RENTAL)
+	 * @deprecated Use calculatePriceV2 for dual-mode support
 	 */
 	async calculatePrice(carId: number, pickupLocation: string, dropoffLocation: string, startDate: string, endDate: string, estimatedDistance?: number) {
 		const car = await this.prisma.car.findUnique({
@@ -391,12 +680,10 @@ export class CarsService {
 		// Use provided distance or estimate
 		let distance = estimatedDistance;
 		if (!distance) {
-			// TODO: Integrate with Google Maps API to get actual distance
-			// For now, we'll use a placeholder distance calculation
 			distance = await this.estimateDistance(pickupLocation, dropoffLocation);
 		}
 
-		// Calculate pricing
+		// Calculate pricing (legacy rental formula)
 		const basePrice = parseFloat(car.base_price_per_day.toString()) * days;
 		const distancePrice = parseFloat(car.distance_rate_per_km.toString()) * distance;
 		const totalAmount = basePrice + distancePrice;
@@ -421,7 +708,189 @@ export class CarsService {
 	}
 
 	/**
-	 * Create booking request
+	 * Create booking request (v2 - supports both RENTAL and RIDE_HAILING)
+	 */
+	async createBookingRequestV2(data: {
+		car_id: number;
+		user_id: number;
+		pickup_location: string;
+		dropoff_location: string;
+		booking_type: 'RENTAL' | 'RIDE_HAILING';
+		start_date?: string;
+		end_date?: string;
+		scheduled_pickup?: string;
+		customer_notes?: string;
+		payment_method?: 'online' | 'cash' | 'wallet';
+	}) {
+		const {
+			car_id,
+			user_id,
+			pickup_location,
+			dropoff_location,
+			booking_type,
+			start_date,
+			end_date,
+			scheduled_pickup,
+			customer_notes,
+			payment_method,
+		} = data;
+
+		// Validate car exists and is available
+		const car = await this.prisma.car.findUnique({
+			where: { id: car_id },
+			include: {
+				driver: {
+					include: {
+						user: true,
+					},
+				},
+			},
+		});
+
+		if (!car || !car.is_active || !car.driver.is_verified) {
+			throw new NotFoundException('Car not found or driver not verified');
+		}
+
+		// Convert booking type to enum
+		const bookingTypeEnum = booking_type === 'RIDE_HAILING' ? BookingType.RIDE_HAILING : BookingType.RENTAL;
+
+		// Check availability based on booking type
+		const availabilityCheck = await this.checkCarAvailability(
+			car_id,
+			bookingTypeEnum,
+			start_date ? new Date(start_date) : undefined,
+			end_date ? new Date(end_date) : undefined,
+		);
+
+		if (!availabilityCheck.available) {
+			throw new BadRequestException(availabilityCheck.reason || 'Car is not available');
+		}
+
+		// Calculate pricing using v2 method
+		const priceCalculation = await this.calculatePriceV2(car_id, {
+			pickup_location,
+			dropoff_location,
+			booking_type: booking_type,
+			start_date,
+			end_date,
+			scheduled_pickup,
+		});
+
+		// Prepare booking data based on type
+		const bookingData: any = {
+			user_id,
+			car_id,
+			pickup_location,
+			dropoff_location,
+			estimated_distance: priceCalculation.estimated_distance,
+			booking_type: bookingTypeEnum,
+			status: 'PENDING_DRIVER_ACCEPTANCE',
+			total_amount: priceCalculation.pricing_breakdown.total_amount,
+			driver_earnings: priceCalculation.pricing_breakdown.driver_earnings,
+			platform_fee: priceCalculation.pricing_breakdown.platform_fee,
+			currency: 'pkr',
+			customer_notes,
+			payment_method: payment_method ?? 'online',
+			requested_at: new Date(),
+		};
+
+		// Add type-specific fields
+		if (booking_type === 'RENTAL') {
+			bookingData.start_date = new Date(start_date!);
+			bookingData.end_date = new Date(end_date!);
+		} else {
+			// RIDE_HAILING
+			const pickupTime = scheduled_pickup ? new Date(scheduled_pickup) : new Date();
+			bookingData.scheduled_pickup = pickupTime;
+			bookingData.base_fare = priceCalculation.pricing_breakdown.base_price;
+			bookingData.surge_multiplier = priceCalculation.surge_multiplier || 1.0;
+			bookingData.estimated_duration = priceCalculation.estimated_duration;
+		}
+
+		// Store city IDs if detected
+		if (priceCalculation.detected_cities?.pickup_city_id) {
+			bookingData.pickup_city_id = priceCalculation.detected_cities.pickup_city_id;
+		}
+		if (priceCalculation.detected_cities?.dropoff_city_id) {
+			bookingData.dropoff_city_id = priceCalculation.detected_cities.dropoff_city_id;
+		}
+
+		// Create booking
+		const booking = await this.prisma.carBooking.create({
+			data: bookingData,
+			include: {
+				user: {
+					select: {
+						id: true,
+						full_name: true,
+						email: true,
+					},
+				},
+				car: {
+					include: {
+						carModel: true,
+						driver: {
+							include: {
+								user: {
+									select: {
+										id: true,
+										full_name: true,
+										email: true,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		});
+
+		// Send notification to driver
+		await this.notificationsService.notifyBookingRequest(
+			booking.car.driver.user.id,
+			booking.id,
+			booking.user.full_name,
+		);
+
+		return {
+			id: booking.id,
+			status: booking.status,
+			booking_type: booking.booking_type,
+			message: booking_type === 'RIDE_HAILING'
+				? 'Ride request sent to driver. You will be notified when they respond.'
+				: 'Booking request sent to driver. You will be notified when they respond.',
+			booking_details: {
+				car: {
+					make: booking.car.carModel.make,
+					model: booking.car.carModel.model,
+					year: booking.car.year,
+				},
+				driver: {
+					name: booking.car.driver.user.full_name,
+				},
+				pickup_location: booking.pickup_location,
+				dropoff_location: booking.dropoff_location,
+				...(booking_type === 'RENTAL' && {
+					start_date: booking.start_date?.toISOString().split('T')[0],
+					end_date: booking.end_date?.toISOString().split('T')[0],
+				}),
+				...(booking_type === 'RIDE_HAILING' && {
+					scheduled_pickup: booking.scheduled_pickup?.toISOString(),
+					estimated_duration: priceCalculation.estimated_duration,
+					surge_multiplier: priceCalculation.surge_multiplier,
+				}),
+				pricing: {
+					total_amount: parseFloat(booking.total_amount.toString()),
+					driver_earnings: parseFloat(booking.driver_earnings.toString()),
+					platform_fee: parseFloat(booking.platform_fee.toString()),
+				},
+			},
+		};
+	}
+
+	/**
+	 * Create booking request (legacy - assumes RENTAL type)
+	 * @deprecated Use createBookingRequestV2 for dual-mode support
 	 */
 	async createBookingRequest(data: any) {
 		const { car_id, user_id, pickup_location, dropoff_location, start_date, end_date, customer_notes, payment_method } = data;
@@ -475,6 +944,7 @@ export class CarsService {
 				pickup_location,
 				dropoff_location,
 				estimated_distance: priceCalculation.estimated_distance,
+				booking_type: BookingType.RENTAL,
 				start_date: new Date(start_date),
 				end_date: new Date(end_date),
 				status: 'PENDING_DRIVER_ACCEPTANCE',
@@ -1248,6 +1718,249 @@ export class CarsService {
 			// Fallback to placeholder
 			return 100; // 100km placeholder
 		}
+	}
+
+	/**
+	 * Helper method to estimate distance AND duration
+	 */
+	private async estimateDistanceAndDuration(pickup: string, dropoff: string): Promise<{ distance: number; duration: number }> {
+		try {
+			const result = await this.googlePlacesService.getDistanceAndDuration(pickup, dropoff);
+			
+			if (result !== null) {
+				return {
+					distance: result.distance_km,
+					duration: result.duration_minutes,
+				};
+			}
+
+			// Fallback: Estimate duration based on distance at 40 km/h average
+			const fallbackDistance = 100;
+			return {
+				distance: fallbackDistance,
+				duration: Math.ceil((fallbackDistance / 40) * 60), // minutes
+			};
+		} catch (error) {
+			console.error('Error estimating distance and duration:', error);
+			return {
+				distance: 100,
+				duration: 150, // 2.5 hours fallback
+			};
+		}
+	}
+
+	/**
+	 * Calculate surge multiplier based on date/time
+	 * - Weekday peak hours (7-9am, 5-7pm): 1.3x
+	 * - Weekends: 1.2x
+	 * - Otherwise: 1.0x
+	 */
+	private calculateSurgeMultiplier(dateTime: Date): number {
+		const hour = dateTime.getHours();
+		const dayOfWeek = dateTime.getDay(); // 0 = Sunday, 6 = Saturday
+
+		// Weekend surge
+		if (dayOfWeek === 0 || dayOfWeek === 6) {
+			return 1.2;
+		}
+
+		// Weekday peak hours
+		const isMorningPeak = hour >= 7 && hour < 9;
+		const isEveningPeak = hour >= 17 && hour < 19;
+
+		if (isMorningPeak || isEveningPeak) {
+			return 1.3;
+		}
+
+		// Normal hours
+		return 1.0;
+	}
+
+	/**
+	 * Calculate rental pricing (city-to-city, multi-day)
+	 * Formula: (Days × base_price_per_day) + (Distance × distance_rate_per_km) - 5% platform fee
+	 */
+	private calculateRentalPrice(
+		car: any,
+		startDate: Date,
+		endDate: Date,
+		distance: number,
+	): PricingBreakdown {
+		const days = Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)));
+		
+		const basePricePerDay = parseFloat(car.base_price_per_day?.toString() || '0');
+		const distanceRatePerKm = parseFloat(car.distance_rate_per_km?.toString() || '0');
+
+		const basePrice = basePricePerDay * days;
+		const distancePrice = distanceRatePerKm * distance;
+		const subtotal = basePrice + distancePrice;
+		
+		const platformFeePercentage = 0.05; // 5% for rentals
+		const platformFee = Math.round(subtotal * platformFeePercentage);
+		const driverEarnings = subtotal - platformFee;
+
+		return {
+			base_price: basePrice,
+			distance_price: distancePrice,
+			subtotal,
+			total_amount: subtotal,
+			driver_earnings: driverEarnings,
+			platform_fee: platformFee,
+			platform_fee_percentage: platformFeePercentage * 100,
+		};
+	}
+
+	/**
+	 * Calculate ride-hailing pricing (within-city)
+	 * Formula: Base Fare + (Distance × per_km_rate) + (Duration × per_minute_rate) × surge_multiplier
+	 * Minimum fare applies, 15% platform fee
+	 */
+	private calculateRideHailingPrice(
+		car: any,
+		distance: number,
+		duration: number,
+		scheduledPickup: Date,
+	): PricingBreakdown {
+		const baseFare = parseFloat(car.base_fare?.toString() || '50');
+		const perKmRate = parseFloat(car.per_km_rate?.toString() || '15');
+		const perMinuteRate = parseFloat(car.per_minute_rate?.toString() || '2');
+		const minimumFare = parseFloat(car.minimum_fare?.toString() || '100');
+
+		const distanceFare = distance * perKmRate;
+		const timeFare = duration * perMinuteRate;
+		const subtotal = baseFare + distanceFare + timeFare;
+
+		const surgeMultiplier = this.calculateSurgeMultiplier(scheduledPickup);
+		const fareAfterSurge = subtotal * surgeMultiplier;
+		const totalAmount = Math.max(fareAfterSurge, minimumFare);
+
+		const platformFeePercentage = 0.15; // 15% for ride-hailing
+		const platformFee = Math.round(totalAmount * platformFeePercentage);
+		const driverEarnings = totalAmount - platformFee;
+
+		return {
+			base_price: baseFare,
+			distance_price: distanceFare,
+			time_price: timeFare,
+			surge_multiplier: surgeMultiplier,
+			subtotal,
+			total_amount: Math.round(totalAmount),
+			driver_earnings: Math.round(driverEarnings),
+			platform_fee: platformFee,
+			platform_fee_percentage: platformFeePercentage * 100,
+		};
+	}
+
+	/**
+	 * Auto-detect booking type based on pickup/dropoff cities
+	 * Returns RIDE_HAILING if same city/metropolitan area, RENTAL if different cities
+	 */
+	private async detectBookingType(
+		pickupLocation: string,
+		dropoffLocation: string,
+	): Promise<{ bookingType: BookingType; detectedCities: DetectedCities }> {
+		const [pickupCity, dropoffCity] = await Promise.all([
+			this.googlePlacesService.getCityFromAddress(pickupLocation),
+			this.googlePlacesService.getCityFromAddress(dropoffLocation),
+		]);
+
+		const detectedCities: DetectedCities = {
+			pickup_city_id: pickupCity?.city_id,
+			pickup_city_name: pickupCity?.city_name,
+			dropoff_city_id: dropoffCity?.city_id,
+			dropoff_city_name: dropoffCity?.city_name,
+		};
+
+		// If we can't detect cities, default to RENTAL (safer assumption)
+		if (!pickupCity || !dropoffCity) {
+			return { bookingType: BookingType.RENTAL, detectedCities };
+		}
+
+		// Use metropolitan area check for twin cities (e.g., Islamabad-Rawalpindi)
+		const isSameArea = this.googlePlacesService.areSameMetropolitanArea(pickupCity, dropoffCity);
+
+		return {
+			bookingType: isSameArea ? BookingType.RIDE_HAILING : BookingType.RENTAL,
+			detectedCities,
+		};
+	}
+
+	/**
+	 * Check car availability for a booking
+	 * For RENTAL: Check date range overlaps
+	 * For RIDE_HAILING: Check driver mode and active bookings
+	 */
+	private async checkCarAvailability(
+		carId: number,
+		bookingType: BookingType,
+		startDate?: Date,
+		endDate?: Date,
+	): Promise<{ available: boolean; reason?: string }> {
+		const car = await this.prisma.car.findUnique({
+			where: { id: carId },
+			include: {
+				driver: true,
+				carBookings: {
+					where: {
+						status: {
+							in: ['PENDING_DRIVER_ACCEPTANCE', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS'],
+						},
+					},
+				},
+			},
+		});
+
+		if (!car) {
+			return { available: false, reason: 'Car not found' };
+		}
+
+		if (bookingType === BookingType.RENTAL) {
+			// Check availability flags
+			if (!car.available_for_rental) {
+				return { available: false, reason: 'Car is not available for rental' };
+			}
+
+			// Check for date overlaps with existing RENTAL bookings
+			if (startDate && endDate) {
+				const conflictingBookings = car.carBookings.filter(booking => {
+					if (booking.booking_type !== BookingType.RENTAL) return false;
+					if (!booking.start_date || !booking.end_date) return false;
+					return booking.start_date <= endDate && booking.end_date >= startDate;
+				});
+
+				if (conflictingBookings.length > 0) {
+					return { available: false, reason: 'Car is not available for the selected dates' };
+				}
+			}
+		} else if (bookingType === BookingType.RIDE_HAILING) {
+			// Check availability flags
+			if (!car.available_for_ride_hailing) {
+				return { available: false, reason: 'Car is not available for ride-hailing' };
+			}
+
+			// Check driver mode
+			if (car.current_mode !== 'ride_hailing') {
+				return { available: false, reason: 'Driver is not currently accepting ride-hailing requests' };
+			}
+
+			// Check for active IN_PROGRESS ride-hailing booking
+			const activeRide = car.carBookings.find(
+				booking => booking.booking_type === BookingType.RIDE_HAILING && booking.status === 'IN_PROGRESS'
+			);
+
+			if (activeRide) {
+				return { available: false, reason: 'Driver currently has an active ride in progress' };
+			}
+
+			// Check for any active RENTAL booking
+			const activeRental = car.carBookings.find(booking => booking.booking_type === BookingType.RENTAL);
+
+			if (activeRental) {
+				return { available: false, reason: 'Car has an active rental booking' };
+			}
+		}
+
+		return { available: true };
 	}
 
 	/**
@@ -2375,5 +3088,234 @@ export class CarsService {
 		if (temperature < 25) return 'Pleasant weather — ideal for exploring';
 		if (temperature < 35) return 'Warm weather — stay hydrated';
 		return 'Hot season — plan outdoor activities for mornings/evenings';
+	}
+
+	// =====================
+	// Driver Mode Management
+	// =====================
+
+	/**
+	 * Switch driver's operating mode (offline/ride_hailing/rental)
+	 * Updates all of the driver's cars with the new mode
+	 * 
+	 * Validations:
+	 * - Cannot switch to ride_hailing if any active rental exists
+	 * - Cannot switch to rental if ride_hailing mode is active with pending rides
+	 */
+	async switchDriverMode(driverId: number, mode: 'offline' | 'ride_hailing' | 'rental'): Promise<{
+		success: boolean;
+		mode: string;
+		updated_cars: number;
+		message: string;
+	}> {
+		// Get driver and their cars
+		const driver = await this.prisma.driver.findUnique({
+			where: { id: driverId },
+			include: {
+				cars: {
+					include: {
+						carBookings: {
+							where: {
+								status: {
+									in: ['PENDING_DRIVER_ACCEPTANCE', 'ACCEPTED', 'CONFIRMED', 'IN_PROGRESS'],
+								},
+							},
+						},
+					},
+				},
+			},
+		});
+
+		if (!driver) {
+			throw new NotFoundException('Driver not found');
+		}
+
+		if (!driver.is_verified) {
+			throw new ForbiddenException('Driver must be verified to switch modes');
+		}
+
+		// Validation checks
+		if (mode === 'ride_hailing') {
+			// Check for any active RENTAL bookings (not cancelled/completed)
+			const activeRentals = driver.cars.flatMap(car => 
+				car.carBookings.filter(b => b.booking_type === BookingType.RENTAL)
+			);
+
+			if (activeRentals.length > 0) {
+				// Find the next upcoming or active rental
+				const now = new Date();
+				const conflictingRentals = activeRentals.filter(b => {
+					const endDate = b.end_date ? new Date(b.end_date) : null;
+					return !endDate || endDate >= now;
+				});
+
+				if (conflictingRentals.length > 0) {
+					const nextRental = conflictingRentals[0];
+					const startDate = nextRental.start_date ? new Date(nextRental.start_date).toLocaleDateString() : 'N/A';
+					const endDate = nextRental.end_date ? new Date(nextRental.end_date).toLocaleDateString() : 'N/A';
+					
+					throw new BadRequestException(
+						`Cannot switch to ride-hailing mode: You have ${conflictingRentals.length} active/upcoming rental booking(s). ` +
+						`Next rental: ${startDate} - ${endDate}. Complete or cancel them first.`
+					);
+				}
+			}
+
+			// Check that at least one car is enabled for ride-hailing
+			const rideHailingCars = driver.cars.filter(car => car.available_for_ride_hailing && car.is_active);
+			if (rideHailingCars.length === 0) {
+				throw new BadRequestException(
+					'Cannot switch to ride-hailing mode: No cars are configured for ride-hailing. ' +
+					'Enable ride-hailing on at least one car first.'
+				);
+			}
+		}
+
+		if (mode === 'rental') {
+			// Check for any IN_PROGRESS ride-hailing bookings
+			const activeRides = driver.cars.flatMap(car =>
+				car.carBookings.filter(b => 
+					b.booking_type === BookingType.RIDE_HAILING && b.status === 'IN_PROGRESS'
+				)
+			);
+
+			if (activeRides.length > 0) {
+				throw new BadRequestException(
+					'Cannot switch to rental mode: You have an active ride in progress. ' +
+					'Complete it first.'
+				);
+			}
+		}
+
+		// Update all of driver's active cars with the new mode
+		const updatedCars = await this.prisma.car.updateMany({
+			where: {
+				driver_id: driverId,
+				is_active: true,
+			},
+			data: {
+				current_mode: mode,
+			},
+		});
+
+		// Log the mode switch
+		this.logger.log(`Driver ${driverId} switched to ${mode} mode (${updatedCars.count} cars updated)`);
+
+		const modeMessages = {
+			offline: 'You are now offline and not accepting any bookings.',
+			ride_hailing: 'You are now accepting ride-hailing requests within your city.',
+			rental: 'You are now accepting rental booking requests.',
+		};
+
+		return {
+			success: true,
+			mode,
+			updated_cars: updatedCars.count,
+			message: modeMessages[mode],
+		};
+	}
+
+	/**
+	 * Get driver's current mode
+	 */
+	async getDriverMode(driverId: number): Promise<{
+		mode: string;
+		cars: Array<{
+			id: number;
+			make: string;
+			model: string;
+			current_mode: string;
+			available_for_rental: boolean;
+			available_for_ride_hailing: boolean;
+		}>;
+	}> {
+		const driver = await this.prisma.driver.findUnique({
+			where: { id: driverId },
+			include: {
+				cars: {
+					where: { is_active: true },
+					include: {
+						carModel: true,
+					},
+				},
+			},
+		});
+
+		if (!driver) {
+			throw new NotFoundException('Driver not found');
+		}
+
+		// Determine overall mode from first car (all should be same)
+		const currentMode = driver.cars[0]?.current_mode || 'offline';
+
+		return {
+			mode: currentMode,
+			cars: driver.cars.map(car => ({
+				id: car.id,
+				make: car.carModel.make,
+				model: car.carModel.model,
+				current_mode: car.current_mode || 'offline',
+				available_for_rental: car.available_for_rental,
+				available_for_ride_hailing: car.available_for_ride_hailing,
+			})),
+		};
+	}
+
+	/**
+	 * Enable/disable a car for ride-hailing mode
+	 */
+	async updateCarRideHailingSettings(
+		carId: number,
+		driverId: number,
+		settings: {
+			available_for_ride_hailing?: boolean;
+			base_fare?: number;
+			per_km_rate?: number;
+			per_minute_rate?: number;
+			minimum_fare?: number;
+		},
+	): Promise<any> {
+		const car = await this.prisma.car.findUnique({
+			where: { id: carId },
+			include: { driver: true },
+		});
+
+		if (!car) {
+			throw new NotFoundException('Car not found');
+		}
+
+		if (car.driver_id !== driverId) {
+			throw new ForbiddenException('You can only update your own cars');
+		}
+
+		const updatedCar = await this.prisma.car.update({
+			where: { id: carId },
+			data: {
+				...(settings.available_for_ride_hailing !== undefined && {
+					available_for_ride_hailing: settings.available_for_ride_hailing,
+				}),
+				...(settings.base_fare !== undefined && { base_fare: settings.base_fare }),
+				...(settings.per_km_rate !== undefined && { per_km_rate: settings.per_km_rate }),
+				...(settings.per_minute_rate !== undefined && { per_minute_rate: settings.per_minute_rate }),
+				...(settings.minimum_fare !== undefined && { minimum_fare: settings.minimum_fare }),
+			},
+			include: {
+				carModel: true,
+			},
+		});
+
+		return {
+			id: updatedCar.id,
+			make: updatedCar.carModel.make,
+			model: updatedCar.carModel.model,
+			available_for_ride_hailing: updatedCar.available_for_ride_hailing,
+			base_fare: updatedCar.base_fare?.toString(),
+			per_km_rate: updatedCar.per_km_rate?.toString(),
+			per_minute_rate: updatedCar.per_minute_rate?.toString(),
+			minimum_fare: updatedCar.minimum_fare?.toString(),
+			message: settings.available_for_ride_hailing
+				? 'Car is now available for ride-hailing'
+				: 'Ride-hailing settings updated',
+		};
 	}
 }

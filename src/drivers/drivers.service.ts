@@ -768,6 +768,154 @@ export class DriversService {
 			warning_sent: !!driver.last_warning_at,
 		};
 	}
+
+	/**
+	 * Switch driver's mode across all their cars
+	 * Modes: 'offline' | 'ride_hailing' | 'rental'
+	 * 
+	 * Prevents switching if there are active bookings
+	 */
+	async switchMode(userId: number, mode: 'offline' | 'ride_hailing' | 'rental') {
+		const driver = await this.prisma.driver.findFirst({
+			where: { user_id: userId },
+			include: { cars: true },
+		});
+
+		if (!driver) {
+			throw new NotFoundException('Driver profile not found');
+		}
+
+		if (!driver.is_verified) {
+			throw new BadRequestException('Driver must be verified to switch modes');
+		}
+
+		// Check for active bookings (IN_PROGRESS status)
+		const activeBooking = await this.prisma.carBooking.findFirst({
+			where: {
+				car: { driver_id: driver.id },
+				status: 'IN_PROGRESS',
+			},
+		});
+
+		if (activeBooking) {
+			throw new BadRequestException(
+				'Cannot switch mode while you have an active ride in progress. Complete the current ride first.'
+			);
+		}
+
+		// Validate mode is allowed for the cars
+		if (mode === 'ride_hailing') {
+			const eligibleCars = driver.cars.filter(car => car.available_for_ride_hailing && car.is_active);
+			if (eligibleCars.length === 0) {
+				throw new BadRequestException(
+					'None of your cars are enabled for ride-hailing. Enable ride-hailing in car settings first.'
+				);
+			}
+		}
+
+		if (mode === 'rental') {
+			const eligibleCars = driver.cars.filter(car => car.available_for_rental && car.is_active);
+			if (eligibleCars.length === 0) {
+				throw new BadRequestException(
+					'None of your cars are enabled for rental. Enable rental in car settings first.'
+				);
+			}
+		}
+
+		// Update all active cars to the new mode
+		await this.prisma.car.updateMany({
+			where: {
+				driver_id: driver.id,
+				is_active: true,
+			},
+			data: {
+				current_mode: mode,
+			},
+		});
+
+		return {
+			success: true,
+			message: `Mode switched to ${mode}`,
+			mode,
+			updated_cars: driver.cars.filter(c => c.is_active).length,
+		};
+	}
+
+	/**
+	 * Get current driver mode and availability status
+	 */
+	async getModeStatus(userId: number) {
+		const driver = await this.prisma.driver.findFirst({
+			where: { user_id: userId },
+			include: {
+				cars: {
+					where: { is_active: true },
+					select: {
+						id: true,
+						current_mode: true,
+						available_for_rental: true,
+						available_for_ride_hailing: true,
+						is_listed: true,
+						carModel: {
+							select: {
+								make: true,
+								model: true,
+							},
+						},
+					},
+				},
+			},
+		});
+
+		if (!driver) {
+			throw new NotFoundException('Driver profile not found');
+		}
+
+		// Check for pending ride-hailing requests
+		const pendingRideHailingRequests = await this.prisma.carBooking.count({
+			where: {
+				car: { driver_id: driver.id },
+				booking_type: 'RIDE_HAILING',
+				status: 'PENDING_DRIVER_ACCEPTANCE',
+			},
+		});
+
+		// Check for active bookings
+		const activeBooking = await this.prisma.carBooking.findFirst({
+			where: {
+				car: { driver_id: driver.id },
+				status: 'IN_PROGRESS',
+			},
+			select: {
+				id: true,
+				booking_type: true,
+				pickup_location: true,
+				dropoff_location: true,
+			},
+		});
+
+		// Determine primary mode (most common across cars)
+		const modes = driver.cars.map(c => c.current_mode);
+		const primaryMode = modes.length > 0 ? modes[0] : 'offline';
+
+		return {
+			driver_id: driver.id,
+			is_verified: driver.is_verified,
+			primary_mode: primaryMode,
+			cars: driver.cars.map(car => ({
+				id: car.id,
+				name: `${car.carModel.make} ${car.carModel.model}`,
+				current_mode: car.current_mode,
+				available_for_rental: car.available_for_rental,
+				available_for_ride_hailing: car.available_for_ride_hailing,
+				is_listed: car.is_listed,
+			})),
+			pending_ride_hailing_requests: pendingRideHailingRequests,
+			has_active_booking: !!activeBooking,
+			active_booking: activeBooking,
+			can_switch_mode: !activeBooking,
+		};
+	}
 }
 
 

@@ -1,6 +1,26 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError } from 'axios';
+import { PrismaService } from '../../prisma/prisma.service';
+
+export interface CityInfo {
+  city_name: string;
+  city_id?: number;
+  metropolitan_area?: string; // For twin/metro cities like Islamabad-Rawalpindi
+}
+
+export interface DistanceAndDuration {
+  distance_km: number;
+  duration_minutes: number;
+}
+
+// Metropolitan area mappings - cities that should be treated as same area for ride-hailing
+const METROPOLITAN_AREAS: Record<string, string[]> = {
+  'Islamabad-Rawalpindi': ['Islamabad', 'Rawalpindi', 'Pindi', 'Isb'],
+  'Karachi Metropolitan': ['Karachi', 'Clifton', 'Defence', 'DHA Karachi', 'Gulshan-e-Iqbal'],
+  'Lahore Metropolitan': ['Lahore', 'Gulberg', 'DHA Lahore', 'Model Town', 'Johar Town'],
+  'Faisalabad Metropolitan': ['Faisalabad', 'Lyallpur'],
+};
 
 export interface GooglePlacesReview {
   author_name: string;
@@ -43,11 +63,20 @@ export class GooglePlacesService {
   private readonly logger = new Logger(GooglePlacesService.name);
   private readonly apiKey: string;
   private readonly baseUrl = 'https://maps.googleapis.com/maps/api/place';
+  private readonly geocodingBaseUrl = 'https://maps.googleapis.com/maps/api/geocode';
 
   private readonly distanceMatrixApiKey: string;
   private readonly distanceMatrixBaseUrl = 'https://maps.googleapis.com/maps/api/distancematrix';
 
-  constructor(private configService: ConfigService) {
+  // Simple in-memory cache for API responses (performance optimization)
+  private readonly cache = new Map<string, { data: any; timestamp: number }>();
+  private readonly CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes cache
+  private readonly MAX_CACHE_SIZE = 1000; // Prevent unbounded growth
+
+  constructor(
+    private configService: ConfigService,
+    @Inject(forwardRef(() => PrismaService)) private prisma: PrismaService,
+  ) {
     this.apiKey = this.configService.get('GOOGLE_PLACES_API_KEY') || '';
     this.distanceMatrixApiKey = this.configService.get('GOOGLE_DISTANCE_MATRIX_API_KEY') || this.apiKey;
     
@@ -62,6 +91,43 @@ export class GooglePlacesService {
     } else {
       this.logger.log('Google Distance Matrix API initialized');
     }
+  }
+
+  /**
+   * Get cached value if valid
+   */
+  private getCached<T>(key: string): T | null {
+    const cached = this.cache.get(key);
+    if (cached && Date.now() - cached.timestamp < this.CACHE_TTL_MS) {
+      this.logger.debug(`Cache hit for: ${key.substring(0, 50)}...`);
+      return cached.data as T;
+    }
+    if (cached) {
+      this.cache.delete(key); // Expired
+    }
+    return null;
+  }
+
+  /**
+   * Set cache value with auto-cleanup
+   */
+  private setCache(key: string, data: any): void {
+    // Clean up old entries if cache is full
+    if (this.cache.size >= this.MAX_CACHE_SIZE) {
+      const now = Date.now();
+      for (const [k, v] of this.cache.entries()) {
+        if (now - v.timestamp > this.CACHE_TTL_MS) {
+          this.cache.delete(k);
+        }
+      }
+      // If still full, delete oldest entries
+      if (this.cache.size >= this.MAX_CACHE_SIZE) {
+        const entriesToDelete = Math.floor(this.MAX_CACHE_SIZE / 4);
+        const keys = Array.from(this.cache.keys()).slice(0, entriesToDelete);
+        keys.forEach(k => this.cache.delete(k));
+      }
+    }
+    this.cache.set(key, { data, timestamp: Date.now() });
   }
 
   /**
@@ -346,6 +412,212 @@ export class GooglePlacesService {
       }
       return null;
     }
+  }
+
+  /**
+   * Calculate both distance AND duration using Distance Matrix API
+   * @param origin Origin location (e.g., "Karachi, Pakistan")
+   * @param destination Destination location (e.g., "Lahore, Pakistan")
+   * @returns Distance in kilometers and duration in minutes, or null if calculation fails
+   */
+  async getDistanceAndDuration(origin: string, destination: string): Promise<DistanceAndDuration | null> {
+    try {
+      if (!this.distanceMatrixApiKey || this.distanceMatrixApiKey.trim() === '') {
+        this.logger.warn('Google Distance Matrix API key not configured');
+        return null;
+      }
+
+      // Check cache first
+      const cacheKey = `distance:${origin.toLowerCase().trim()}:${destination.toLowerCase().trim()}`;
+      const cached = this.getCached<DistanceAndDuration>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+
+      this.logger.log(`Calculating distance and duration from ${origin} to ${destination}`);
+
+      const response = await axios.get(`${this.distanceMatrixBaseUrl}/json`, {
+        params: {
+          origins: origin,
+          destinations: destination,
+          units: 'metric',
+          key: this.distanceMatrixApiKey,
+        },
+        timeout: 10000,
+      });
+
+      if (response.data?.status === 'OK' && response.data?.rows?.[0]?.elements?.[0]?.status === 'OK') {
+        const element = response.data.rows[0].elements[0];
+        const distanceInMeters = element.distance.value;
+        const distanceInKm = distanceInMeters / 1000;
+        const durationInSeconds = element.duration.value;
+        const durationInMinutes = Math.ceil(durationInSeconds / 60);
+        
+        this.logger.log(`Distance: ${distanceInKm.toFixed(2)} km, Duration: ${durationInMinutes} minutes`);
+        const result: DistanceAndDuration = {
+          distance_km: Math.round(distanceInKm * 10) / 10,
+          duration_minutes: durationInMinutes,
+        };
+
+        // Cache the result
+        this.setCache(cacheKey, result);
+
+        return result;
+      }
+
+      this.logger.warn(`Could not calculate distance/duration: ${response.data?.status}`);
+      return null;
+    } catch (error) {
+      this.logger.error('Error calculating distance and duration:', (error as Error).message);
+      return null;
+    }
+  }
+
+  /**
+   * Get city name from an address using Google Geocoding API
+   * Also attempts to match against City table in database
+   * @param address Full address string (e.g., "M.A. Jinnah Road, Karachi, Pakistan")
+   * @returns City info with name and optional database ID
+   */
+  async getCityFromAddress(address: string): Promise<CityInfo | null> {
+    try {
+      if (!this.apiKey || this.apiKey.trim() === '') {
+        this.logger.warn('Google Places API key not configured');
+        return null;
+      }
+
+      // Check cache first
+      const cacheKey = `city:${address.toLowerCase().trim()}`;
+      const cached = this.getCached<CityInfo>(cacheKey);
+      if (cached) {
+        return cached;
+      }
+
+      this.logger.log(`Getting city from address: ${address}`);
+
+      const response = await axios.get(`${this.geocodingBaseUrl}/json`, {
+        params: {
+          address: address,
+          key: this.apiKey,
+        },
+        timeout: 10000,
+      });
+
+      if (response.data?.status === 'OK' && response.data?.results?.[0]) {
+        const result = response.data.results[0];
+        const addressComponents = result.address_components || [];
+
+        // Extract city name from address components
+        // Priority: locality > administrative_area_level_2 > administrative_area_level_1
+        let cityName: string | null = null;
+
+        for (const component of addressComponents) {
+          if (component.types.includes('locality')) {
+            cityName = component.long_name;
+            break;
+          }
+          if (component.types.includes('administrative_area_level_2') && !cityName) {
+            cityName = component.long_name;
+          }
+          if (component.types.includes('administrative_area_level_1') && !cityName) {
+            cityName = component.long_name;
+          }
+        }
+
+        if (!cityName) {
+          this.logger.warn(`Could not extract city from address: ${address}`);
+          return null;
+        }
+
+        this.logger.log(`Extracted city: ${cityName}`);
+
+        // Try to match against database
+        const cityFromDb = await this.prisma.city.findFirst({
+          where: {
+            OR: [
+              { name: { equals: cityName, mode: 'insensitive' } },
+              { name: { contains: cityName, mode: 'insensitive' } },
+            ],
+          },
+        });
+
+        // Detect metropolitan area
+        const metropolitanArea = this.getMetropolitanArea(cityName);
+
+        const cityInfo: CityInfo = {
+          city_name: cityName,
+          city_id: cityFromDb?.id,
+          metropolitan_area: metropolitanArea,
+        };
+
+        // Cache the result
+        this.setCache(cacheKey, cityInfo);
+
+        return cityInfo;
+      }
+
+      this.logger.warn(`Geocoding failed for address: ${address} (${response.data?.status})`);
+      return null;
+    } catch (error) {
+      this.logger.error('Error getting city from address:', (error as Error).message);
+      return null;
+    }
+  }
+
+  /**
+   * Get the metropolitan area name for a city (if it belongs to one)
+   */
+  private getMetropolitanArea(cityName: string): string | undefined {
+    const lowerCityName = cityName.toLowerCase();
+    
+    for (const [metro, cities] of Object.entries(METROPOLITAN_AREAS)) {
+      if (cities.some(c => lowerCityName.includes(c.toLowerCase()) || c.toLowerCase().includes(lowerCityName))) {
+        return metro;
+      }
+    }
+    
+    return undefined;
+  }
+
+  /**
+   * Check if two cities are in the same metropolitan area
+   */
+  areSameMetropolitanArea(city1: CityInfo | null, city2: CityInfo | null): boolean {
+    if (!city1 || !city2) return false;
+    
+    // Same city
+    if (city1.city_id && city2.city_id && city1.city_id === city2.city_id) {
+      return true;
+    }
+    
+    // Same name
+    if (city1.city_name.toLowerCase() === city2.city_name.toLowerCase()) {
+      return true;
+    }
+    
+    // Same metropolitan area
+    if (city1.metropolitan_area && city2.metropolitan_area && 
+        city1.metropolitan_area === city2.metropolitan_area) {
+      return true;
+    }
+    
+    return false;
+  }
+
+  /**
+   * Determine if two addresses are in the same city or metropolitan area
+   * @returns true if same city/metro, false if different cities, null if unable to determine
+   */
+  async areSameCity(address1: string, address2: string): Promise<boolean | null> {
+    const city1 = await this.getCityFromAddress(address1);
+    const city2 = await this.getCityFromAddress(address2);
+
+    if (!city1 || !city2) {
+      return null; // Unable to determine
+    }
+
+    // Use metropolitan area check which handles same city, same name, and metro areas
+    return this.areSameMetropolitanArea(city1, city2);
   }
 }
 

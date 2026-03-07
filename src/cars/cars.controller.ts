@@ -23,6 +23,8 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Role } from '@prisma/client';
 import { imageUploadConfig } from '../common/config/multer.config';
+import { CalculatePriceDto } from './dto/calculate-price.dto';
+import { CreateBookingDto, SwitchDriverModeDto } from './dto/create-booking.dto';
 
 @Controller('cars')
 export class CarsController {
@@ -42,11 +44,19 @@ export class CarsController {
 
 	/**
 	 * Search available cars with filters
-	 * GET /cars/search?city_id=1&start_date=2024-02-15&end_date=2024-02-17&seats=4&transmission=automatic
+	 * GET /cars/search?city_id=1&start_date=2024-02-15&end_date=2024-02-17&seats=4&transmission=automatic&booking_type=RENTAL|RIDE_HAILING
+	 * 
+	 * booking_type filter:
+	 * - RENTAL: available_for_rental = true AND no conflicting date bookings
+	 * - RIDE_HAILING: available_for_ride_hailing = true AND current_mode = 'ride_hailing' AND no active rides
+	 * - If not specified, returns all available cars
 	 */
 	@Get('search')
-	async searchCars(@Query() query: any) {
-		return this.carsService.searchCars(query);
+	async searchCars(
+		@Query('booking_type') bookingType?: 'RENTAL' | 'RIDE_HAILING',
+		@Query() query?: any,
+	) {
+		return this.carsService.searchCars({ ...query, booking_type: bookingType });
 	}
 
 	/**
@@ -77,6 +87,15 @@ export class CarsController {
 	}
 
 	/**
+	 * Health check
+	 * GET /cars/health
+	 */
+	@Get('health')
+	health() {
+		return { ok: true, service: 'cars' };
+	}
+
+	/**
 	 * Get car details by ID
 	 * GET /cars/:id
 	 * Uses optional authentication to allow both authenticated and unauthenticated access
@@ -99,52 +118,102 @@ export class CarsController {
 	}
 
 	/**
-	 * Get unavailable dates for a car
-	 * GET /cars/:id/unavailable-dates
+	 * Get unavailable dates / availability status for a car
+	 * GET /cars/:id/unavailable-dates?mode=rental|ride_hailing
+	 * 
+	 * For RENTAL mode: Returns array of unavailable date ranges
+	 * For RIDE_HAILING mode: Returns real-time availability status
 	 */
 	@Get(':id/unavailable-dates')
-	async getUnavailableDates(@Param('id', ParseIntPipe) id: number) {
-		return this.carsService.getUnavailableDates(id);
+	async getUnavailableDates(
+		@Param('id', ParseIntPipe) id: number,
+		@Query('mode') mode?: 'rental' | 'ride_hailing',
+	) {
+		return this.carsService.getUnavailableDates(id, mode);
 	}
 
 	/**
-	 * Calculate price for a specific car and route
+	 * Calculate price for a specific car and route (unified dual-mode)
 	 * POST /cars/:id/calculate-price
+	 * 
+	 * Supports both rental and ride-hailing modes:
+	 * - booking_type: 'RENTAL' | 'RIDE_HAILING' (optional, auto-detected via geocoding)
+	 * - start_date/end_date: Required for RENTAL, ignored for RIDE_HAILING
+	 * - scheduled_pickup: Optional for RIDE_HAILING (defaults to now)
 	 */
 	@Post(':id/calculate-price')
 	async calculatePrice(
 		@Param('id', ParseIntPipe) id: number,
-		@Body() body: {
-			pickup_location: string;
-			dropoff_location: string;
-			start_date: string;
-			end_date: string;
-			estimated_distance?: number; // Customer provides distance for now
-		},
+		@Body() body: CalculatePriceDto,
 	) {
-		return this.carsService.calculatePrice(
-			id,
-			body.pickup_location,
-			body.dropoff_location,
-			body.start_date,
-			body.end_date,
-			body.estimated_distance,
-		);
+		return this.carsService.calculatePriceV2(id, body);
 	}
 
 	/**
-	 * Create booking request (Customer)
+	 * Create booking request (Customer) - unified dual-mode
 	 * POST /cars/bookings/request
+	 * 
+	 * Supports both rental and ride-hailing modes:
+	 * - booking_type: 'RENTAL' | 'RIDE_HAILING' (optional, auto-detected)
+	 * - For RENTAL: start_date and end_date are required
+	 * - For RIDE_HAILING: scheduled_pickup is optional (defaults to now)
 	 */
 	@Post('bookings/request')
 	@UseGuards(JwtAuthGuard, RolesGuard)
 	@Roles(Role.client)
-	async createBookingRequest(@Request() req: any, @Body() body: any) {
+	async createBookingRequest(@Request() req: any, @Body() body: CreateBookingDto) {
 		const userId = req.user.id;
-		return this.carsService.createBookingRequest({
+		return this.carsService.createBookingRequestV2({
 			...body,
 			user_id: userId,
 		});
+	}
+
+	/**
+	 * Switch driver mode (rental/ride-hailing)
+	 * PATCH /cars/driver/mode
+	 */
+	@Patch('driver/mode')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	async switchDriverMode(@Request() req: any, @Body() body: SwitchDriverModeDto) {
+		const driverId = req.user.id;
+		return this.carsService.switchDriverMode(driverId, body.mode);
+	}
+
+	/**
+	 * Get current driver mode
+	 * GET /cars/driver/mode
+	 */
+	@Get('driver/mode')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	async getDriverMode(@Request() req: any) {
+		const driverId = req.user.id;
+		return this.carsService.getDriverMode(driverId);
+	}
+
+	/**
+	 * Update ride-hailing settings for a car
+	 * PATCH /cars/:id/ride-hailing-settings
+	 */
+	@Patch(':id/ride-hailing-settings')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.driver)
+	async updateRideHailingSettings(
+		@Param('id', ParseIntPipe) carId: number,
+		@Request() req: any,
+		@Body() body: {
+			base_fare?: number;
+			per_km_rate?: number;
+			per_minute_rate?: number;
+			minimum_fare?: number;
+			available_for_rental?: boolean;
+			available_for_ride_hailing?: boolean;
+		},
+	) {
+		const driverId = req.user.id;
+		return this.carsService.updateCarRideHailingSettings(carId, driverId, body);
 	}
 
 	/**
@@ -444,12 +513,4 @@ export class CarsController {
 		return this.carsService.getOptimizedCarImages(carId);
 	}
 
-	/**
-	 * Health check
-	 * GET /cars/health
-	 */
-	@Get('health')
-	health() {
-		return { ok: true, service: 'cars' };
-	}
 }

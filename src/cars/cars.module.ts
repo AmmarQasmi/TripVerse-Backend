@@ -9,6 +9,7 @@ import { CloudinaryModule } from '../common/cloudinary/cloudinary.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { AdminModule } from '../admin/admin.module';
 import { GooglePlacesService } from '../common/services/google-places.service';
+import { FeatureFlagService } from '../common/services/feature-flag.service';
 import { WeatherService } from '../weather/weather.service';
 import { JwtModule } from '@nestjs/jwt';
 
@@ -24,7 +25,7 @@ import { JwtModule } from '@nestjs/jwt';
 		}),
 	],
 	controllers: [CarsController],
-	providers: [CarsService, ChatGateway, RolesGuard, GooglePlacesService, WeatherService],
-	exports: [CarsService, ChatGateway],
+	providers: [CarsService, ChatGateway, RolesGuard, GooglePlacesService, WeatherService, FeatureFlagService],
+	exports: [CarsService, ChatGateway, FeatureFlagService],
 })
 export class CarsModule {}

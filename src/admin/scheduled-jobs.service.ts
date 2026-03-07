@@ -294,5 +294,82 @@ export class ScheduledJobsService {
 			this.logger.error('AI chat session cleanup failed:', error);
 		}
 	}
+
+	/**
+	 * Auto-reject ride-hailing booking requests that haven't been accepted within 2 minutes
+	 * Runs every minute to check for timed-out requests
+	 */
+	@Cron(CronExpression.EVERY_MINUTE)
+	async timeoutRideHailingRequests() {
+		try {
+			const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+
+			// Find ride-hailing bookings that are still pending and were created more than 2 minutes ago
+			const timedOutBookings = await this.prisma.carBooking.findMany({
+				where: {
+					booking_type: 'RIDE_HAILING',
+					status: 'PENDING_DRIVER_ACCEPTANCE',
+					created_at: { lt: twoMinutesAgo },
+				},
+				include: {
+					user: {
+						select: { id: true, full_name: true, email: true },
+					},
+					car: {
+						include: {
+							driver: {
+								include: {
+									user: { select: { full_name: true } },
+								},
+							},
+						},
+					},
+				},
+			});
+
+			if (timedOutBookings.length === 0) {
+				return;
+			}
+
+			// Update all timed-out bookings to CANCELLED
+			const bookingIds = timedOutBookings.map(b => b.id);
+			await this.prisma.carBooking.updateMany({
+				where: { id: { in: bookingIds } },
+				data: {
+					status: 'CANCELLED',
+					driver_notes: 'Auto-cancelled: Driver did not respond within 2 minutes',
+				},
+			});
+
+			// Notify customers about the timeout with suggestions
+			for (const booking of timedOutBookings) {
+				// Send the ride request expired notification with suggestions
+				await this.notificationsService.notifyRideRequestExpired(
+					booking.user.id,
+					booking.id,
+					booking.car.driver.user.full_name,
+					booking.pickup_location,
+				);
+				
+				// Also send a follow-up notification with alternatives after a short delay
+				// This is done via a simple setTimeout for now, could be improved with a dedicated job
+				setTimeout(async () => {
+					try {
+						await this.notificationsService.notifyRideAlternatives(
+							booking.user.id,
+							booking.id,
+							booking.dropoff_location,
+						);
+					} catch (err) {
+						this.logger.error(`Failed to send ride alternatives notification for booking ${booking.id}:`, err);
+					}
+				}, 30000); // 30 seconds after the timeout notification
+			}
+
+			this.logger.log(`Ride-hailing timeout: Auto-cancelled ${timedOutBookings.length} request(s)`);
+		} catch (error) {
+			this.logger.error('Ride-hailing timeout job failed:', error);
+		}
+	}
 }
 
