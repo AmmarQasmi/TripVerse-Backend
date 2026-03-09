@@ -15,6 +15,7 @@ import {
 } from '@nestjs/common';
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { HotelsService } from './hotels.service';
+import { ExternalHotelsService } from './external-hotels.service';
 import { JwtAuthGuard } from '../common/guards/auth.guard';
 import { OptionalJwtAuthGuard } from '../common/guards/optional-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -31,6 +32,7 @@ import { CreateReviewDto } from './dto/create-review.dto';
 export class HotelsController {
 	constructor(
 		private readonly hotelsService: HotelsService,
+		private readonly externalHotelsService: ExternalHotelsService,
 		@Inject(PrismaService) private readonly prisma: PrismaService,
 	) {}
 
@@ -149,6 +151,24 @@ export class HotelsController {
 		@Body() dto: CreateReviewDto,
 	) {
 		return this.hotelsService.createReview(user.id, hotelId, dto);
+	}
+
+	/**
+	 * Search external hotels via Google Places API
+	 * GET /hotels/external?city=Kuala+Lumpur
+	 */
+	@Get('external')
+	async searchExternalHotels(@Query('city') city: string) {
+		return this.externalHotelsService.searchHotelsByCity(city);
+	}
+
+	/**
+	 * Get full details of an external hotel by Google Places place_id
+	 * GET /hotels/external/details/:placeId
+	 */
+	@Get('external/details/:placeId')
+	async getExternalHotelDetails(@Param('placeId') placeId: string) {
+		return this.externalHotelsService.getHotelDetails(placeId);
 	}
 
 	/**
