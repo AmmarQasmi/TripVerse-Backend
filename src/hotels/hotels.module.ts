@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { HotelsController } from './hotels.controller';
 import { HotelsService } from './hotels.service';
+import { ExternalHotelsService } from './external-hotels.service';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { AuthModule } from '../auth/auth.module';
 import { CloudinaryModule } from '../common/cloudinary/cloudinary.module';
@@ -9,7 +10,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 @Module({
 	imports: [AuthModule, CloudinaryModule, NotificationsModule],
 	controllers: [HotelsController],
-	providers: [HotelsService, RolesGuard],
+	providers: [HotelsService, ExternalHotelsService, RolesGuard],
 })
 export class HotelsModule {}
 
