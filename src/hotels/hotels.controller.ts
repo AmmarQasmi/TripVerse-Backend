@@ -337,6 +337,36 @@ export class HotelsController {
 	}
 
 	/**
+	 * Upload images for a room type (Admin or Hotel Manager - must own the hotel)
+	 * POST /hotels/:hotelId/rooms/:roomId/images/upload
+	 */
+	@Post(':hotelId/rooms/:roomId/images/upload')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.admin, Role.hotel_manager)
+	@UseInterceptors(FilesInterceptor('images', 10, imageUploadConfig))
+	async uploadRoomImages(
+		@Param('hotelId', ParseIntPipe) hotelId: number,
+		@Param('roomId', ParseIntPipe) roomId: number,
+		@UploadedFiles() files: any[],
+		@CurrentUser() user: any,
+	) {
+		if (!files || files.length === 0) {
+			throw new BadRequestException('No files uploaded or invalid file type. Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.');
+		}
+
+		const allowedMimeTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+		for (const file of files) {
+			if (!file.mimetype || !allowedMimeTypes.includes(file.mimetype.toLowerCase())) {
+				throw new BadRequestException(`Invalid file type: ${file.originalname}. Only JPG, JPEG, PNG, GIF, and WEBP images are allowed.`);
+			}
+		}
+
+		const isAdmin = user.role === Role.admin;
+		const managerId = !isAdmin ? await this.getManagerId(user) : undefined;
+		return this.hotelsService.uploadRoomImages(hotelId, roomId, files, managerId, isAdmin);
+	}
+
+	/**
 	 * Add images to hotel (Admin or Hotel Manager - must own the hotel)
 	 * POST /hotels/:hotelId/images
 	 * Body: { imageUrls: ["url1", "url2"] }

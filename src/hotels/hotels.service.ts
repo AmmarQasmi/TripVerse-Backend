@@ -533,7 +533,7 @@ export class HotelsService {
 		}
 
 		// Create hotel with images and rooms in transaction
-		const hotel = await this.prisma.$transaction(async (tx) => {
+		const { hotel, createdRoomTypes } = await this.prisma.$transaction(async (tx) => {
 			const newHotel = await tx.hotel.create({
 				data: {
 					name: data.name,
@@ -559,10 +559,11 @@ export class HotelsService {
 				});
 			}
 
-			// Create room types if provided
+			// Create room types if provided and collect their IDs
+			const createdRoomTypes: { id: number; name: string }[] = [];
 			if (data.roomTypes?.length > 0) {
 				for (const room of data.roomTypes) {
-					await tx.hotelRoomType.create({
+					const roomType = await tx.hotelRoomType.create({
 						data: {
 							hotel_id: newHotel.id,
 							name: room.name,
@@ -575,10 +576,11 @@ export class HotelsService {
 							is_active: true,
 						},
 					});
+					createdRoomTypes.push({ id: roomType.id, name: roomType.name });
 				}
 			}
 
-			return newHotel;
+			return { hotel: newHotel, createdRoomTypes };
 		});
 
 		// Notify all admins about new hotel listing
@@ -621,6 +623,7 @@ export class HotelsService {
 			id: hotel.id,
 			name: hotel.name,
 			message: 'Hotel created successfully',
+			roomTypes: createdRoomTypes,
 		};
 	}
 
@@ -980,6 +983,66 @@ export class HotelsService {
 		);
 
 		return { message: 'Images reordered successfully' };
+	}
+
+	/**
+	 * Upload images for a room type to Cloudinary and store URLs in the room type's images field
+	 */
+	async uploadRoomImages(hotelId: number, roomId: number, files: any[], managerId?: number, isAdmin: boolean = false) {
+		const roomType = await this.prisma.hotelRoomType.findFirst({
+			where: { id: roomId, hotel_id: hotelId },
+			include: {
+				hotel: {
+					include: {
+						manager: { select: { id: true } },
+					},
+				},
+			},
+		});
+
+		if (!roomType) {
+			throw new NotFoundException('Room type not found');
+		}
+
+		if (!isAdmin && managerId) {
+			if (roomType.hotel.manager_id !== managerId) {
+				throw new ForbiddenException('You can only upload images for your own hotel room types');
+			}
+		}
+
+		if (!files || files.length === 0) {
+			throw new BadRequestException('No files uploaded');
+		}
+
+		try {
+			const uploadResults = await this.cloudinaryService.uploadMultipleImages(
+				files,
+				'hotels/rooms',
+				{
+					transformation: [
+						{ width: 1200, height: 800, crop: 'fill', quality: 'auto' },
+						{ fetch_format: 'auto' },
+					],
+				},
+			);
+
+			const newUrls = uploadResults.map((r: any) => r.secure_url);
+			const existingImages = (roomType.images as string[]) || [];
+			const updatedImages = [...existingImages, ...newUrls];
+
+			await this.prisma.hotelRoomType.update({
+				where: { id: roomId },
+				data: { images: updatedImages },
+			});
+
+			return {
+				message: `${files.length} image(s) uploaded successfully`,
+				images: newUrls,
+			};
+		} catch (error) {
+			console.error('Room image upload error:', error);
+			throw new BadRequestException('Failed to upload room images');
+		}
 	}
 
 	/**
