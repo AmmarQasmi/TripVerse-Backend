@@ -1117,6 +1117,13 @@ export class CarsService {
 			throw new BadRequestException('Booking is no longer pending');
 		}
 
+		const isAutoConfirmWithinCityRide =
+			response === 'accept' &&
+			booking.booking_type === BookingType.RIDE_HAILING &&
+			booking.pickup_city_id != null &&
+			booking.dropoff_city_id != null &&
+			booking.pickup_city_id === booking.dropoff_city_id;
+
 		// Update booking status
 		const updatedBooking = await this.prisma.carBooking.update({
 			where: { id: bookingId },
@@ -1126,6 +1133,15 @@ export class CarsService {
 				driver_notes: driverNotes,
 			},
 		});
+
+		if (isAutoConfirmWithinCityRide) {
+			const confirmedBooking = await this.confirmBooking(bookingId, booking.user_id);
+			return {
+				id: confirmedBooking.id,
+				status: confirmedBooking.status,
+				message: 'Within-city ride accepted and confirmed automatically. Customer can now track you live.',
+			};
+		}
 
 		// Send notification to customer
 		const driverName = booking.car.driver.user?.full_name || 'Driver';
@@ -1326,6 +1342,12 @@ export class CarsService {
 		return bookings.map((booking) => ({
 			id: booking.id,
 			status: booking.status,
+			booking_type:
+				booking.booking_type === BookingType.RIDE_HAILING ? 'ride_hailing' : 'rental',
+			is_intercity:
+				booking.pickup_city_id != null &&
+				booking.dropoff_city_id != null &&
+				booking.pickup_city_id !== booking.dropoff_city_id,
 			car: {
 				make: booking.car.carModel.make,
 				model: booking.car.carModel.model,
@@ -1413,6 +1435,17 @@ export class CarsService {
 		return bookings.map((booking) => ({
 			id: booking.id,
 			status: booking.status,
+			booking_type:
+				booking.booking_type === BookingType.RIDE_HAILING ? 'ride_hailing' : 'rental',
+			is_intercity:
+				booking.pickup_city_id != null &&
+				booking.dropoff_city_id != null &&
+				booking.pickup_city_id !== booking.dropoff_city_id,
+			expires_at:
+				booking.booking_type === BookingType.RIDE_HAILING && booking.status === 'PENDING_DRIVER_ACCEPTANCE'
+					? new Date(booking.created_at.getTime() + 2 * 60 * 1000).toISOString()
+					: null,
+			estimated_distance: booking.estimated_distance ? parseFloat(booking.estimated_distance.toString()) : null,
 			customer: {
 				name: booking.user.full_name,
 			},

@@ -9,6 +9,28 @@ import {
 import { Server, Socket } from 'socket.io';
 import { Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { PrismaService } from '../prisma/prisma.service';
+
+interface DriverLocationPayload {
+	bookingId: number;
+	latitude: number;
+	longitude: number;
+	heading?: number;
+	speed?: number;
+	accuracy?: number;
+	timestamp?: number;
+}
+
+interface BookingLocationState {
+	bookingId: number;
+	driverUserId: number;
+	latitude: number;
+	longitude: number;
+	heading?: number;
+	speed?: number;
+	accuracy?: number;
+	timestamp: number;
+}
 
 @WebSocketGateway({
 	cors: {
@@ -23,8 +45,12 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
 	private readonly logger = new Logger(ChatGateway.name);
 	private readonly bookingRooms = new Map<number, Set<string>>(); // bookingId -> Set of socketIds
+    private readonly latestDriverLocations = new Map<number, BookingLocationState>();
 
-	constructor(private jwtService: JwtService) {}
+	constructor(
+		private jwtService: JwtService,
+		private prisma: PrismaService,
+	) {}
 
 	afterInit(server: Server) {
 		this.logger.log('Chat WebSocket Gateway initialized');
@@ -94,10 +120,22 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 	 * Join a booking chat room
 	 */
 	@SubscribeMessage('join_booking')
-	handleJoinBooking(client: Socket, bookingId: number) {
+	async handleJoinBooking(client: Socket, bookingId: number) {
 		const userId = (client as any).userId;
 		if (!userId) {
 			client.emit('error', { message: 'Unauthorized' });
+			return;
+		}
+
+		const booking = await this.getBookingParticipantInfo(bookingId);
+		if (!booking) {
+			client.emit('error', { message: 'Booking not found' });
+			return;
+		}
+
+		const isParticipant = booking.user_id === userId || booking.car.driver.user_id === userId;
+		if (!isParticipant) {
+			client.emit('error', { message: 'You are not authorized for this booking room' });
 			return;
 		}
 
@@ -112,6 +150,11 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 
 		this.logger.log(`User ${userId} joined booking ${bookingId}`);
 		client.emit('joined_booking', { bookingId });
+
+		const lastLocation = this.latestDriverLocations.get(bookingId);
+		if (lastLocation) {
+			client.emit('driver_location_updated', lastLocation);
+		}
 	}
 
 	/**
@@ -139,12 +182,103 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
 		this.logger.log(`User ${userId} left booking ${bookingId}`);
 	}
 
+	@SubscribeMessage('request_driver_location')
+	handleRequestDriverLocation(client: Socket, bookingId: number) {
+		const userId = (client as any).userId;
+		if (!userId) {
+			client.emit('error', { message: 'Unauthorized' });
+			return;
+		}
+
+		const lastLocation = this.latestDriverLocations.get(bookingId);
+		if (lastLocation) {
+			client.emit('driver_location_updated', lastLocation);
+		}
+	}
+
+	@SubscribeMessage('driver_location_update')
+	async handleDriverLocationUpdate(client: Socket, payload: DriverLocationPayload) {
+		const userId = (client as any).userId;
+		if (!userId) {
+			client.emit('error', { message: 'Unauthorized' });
+			return;
+		}
+
+		const bookingId = Number(payload?.bookingId);
+		if (!bookingId || Number.isNaN(bookingId)) {
+			client.emit('error', { message: 'Invalid booking id' });
+			return;
+		}
+
+		const booking = await this.getBookingParticipantInfo(bookingId);
+		if (!booking) {
+			client.emit('error', { message: 'Booking not found' });
+			return;
+		}
+
+		const isDriverForBooking = booking.car.driver.user_id === userId;
+		if (!isDriverForBooking) {
+			client.emit('error', { message: 'Only assigned driver can share location' });
+			return;
+		}
+
+		const isRideHailing = String(booking.booking_type) === 'RIDE_HAILING';
+		const isTrackableStatus = ['ACCEPTED', 'CONFIRMED', 'IN_PROGRESS'].includes(String(booking.status));
+
+		if (!isRideHailing || !isTrackableStatus) {
+			client.emit('error', { message: 'Location sharing is not available for this booking state' });
+			return;
+		}
+
+		const latitude = Number(payload.latitude);
+		const longitude = Number(payload.longitude);
+		if (Number.isNaN(latitude) || Number.isNaN(longitude)) {
+			client.emit('error', { message: 'Invalid coordinates' });
+			return;
+		}
+
+		const locationState: BookingLocationState = {
+			bookingId,
+			driverUserId: userId,
+			latitude,
+			longitude,
+			heading: payload.heading,
+			speed: payload.speed,
+			accuracy: payload.accuracy,
+			timestamp: payload.timestamp || Date.now(),
+		};
+
+		this.latestDriverLocations.set(bookingId, locationState);
+		this.server.to(`booking_${bookingId}`).emit('driver_location_updated', locationState);
+	}
+
 	/**
 	 * Emit new message to all users in a booking room
 	 */
 	emitNewMessage(bookingId: number, message: any) {
 		this.server.to(`booking_${bookingId}`).emit('new_message', message);
 		this.logger.log(`Message emitted to booking ${bookingId}`);
+	}
+
+	private async getBookingParticipantInfo(bookingId: number) {
+		return this.prisma.carBooking.findUnique({
+			where: { id: bookingId },
+			select: {
+				id: true,
+				user_id: true,
+				booking_type: true,
+				status: true,
+				car: {
+					select: {
+						driver: {
+							select: {
+								user_id: true,
+							},
+						},
+					},
+				},
+			},
+		});
 	}
 }
 
