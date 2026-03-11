@@ -18,10 +18,6 @@ export enum BookingTypeInput {
  * Supports both RENTAL (city-to-city, multi-day) and RIDE_HAILING (within-city, immediate/scheduled)
  */
 export class CalculatePriceDto {
-  @IsNumber()
-  @IsPositive()
-  car_id!: number;
-
   @IsString()
   pickup_location!: string;
 
