@@ -557,6 +557,11 @@ export class DriversService {
 			recent_bookings: recentBookings.map((booking) => ({
 				id: booking.id,
 				status: booking.status,
+				booking_type: booking.booking_type === 'RIDE_HAILING' ? 'ride_hailing' : 'rental',
+				is_intercity: booking.pickup_city_id != null && booking.dropoff_city_id != null && booking.pickup_city_id !== booking.dropoff_city_id,
+				expires_at: booking.booking_type === 'RIDE_HAILING' && booking.status === 'PENDING_DRIVER_ACCEPTANCE'
+					? new Date(booking.created_at.getTime() + 2 * 60 * 1000).toISOString()
+					: null,
 				customer: {
 					name: booking.user.full_name,
 				},
