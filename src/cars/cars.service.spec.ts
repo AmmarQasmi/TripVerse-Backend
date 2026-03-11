@@ -44,12 +44,16 @@ const mockPrismaService = {
 const mockGooglePlacesService = {
   getCityFromAddress: jest.fn(),
   getDistanceAndDuration: jest.fn(),
+  estimateDistanceAndDuration: jest.fn(),
   areSameMetropolitanArea: jest.fn(),
   autocomplete: jest.fn(),
 };
 
 const mockCloudinaryService = {};
-const mockNotificationsService = { sendNotification: jest.fn() };
+const mockNotificationsService = { 
+  sendNotification: jest.fn(),
+  notifyBookingRequest: jest.fn(),
+};
 const mockAdminService = {};
 const mockWeatherService = {};
 const mockConfigService = { get: jest.fn() };
@@ -473,5 +477,643 @@ describe('GooglePlacesService - Metropolitan Areas', () => {
 
     expect(areSameMetropolitanArea(islamabad, rawalpindi)).toBe(true);
     expect(areSameMetropolitanArea(islamabad, lahore)).toBe(false);
+  });
+});
+
+// =====================
+// CarsService Method Tests (Actual Implementation)
+// =====================
+describe('CarsService - Core Methods', () => {
+  let service: CarsService;
+  let prismaService: PrismaService;
+  let googlePlacesService: GooglePlacesService;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        CarsService,
+        { provide: PrismaService, useValue: mockPrismaService },
+        { provide: CloudinaryService, useValue: mockCloudinaryService },
+        { provide: NotificationsService, useValue: mockNotificationsService },
+        { provide: AdminService, useValue: mockAdminService },
+        { provide: GooglePlacesService, useValue: mockGooglePlacesService },
+        { provide: WeatherService, useValue: mockWeatherService },
+        { provide: ConfigService, useValue: mockConfigService },
+      ],
+    }).compile();
+
+    service = module.get<CarsService>(CarsService);
+    prismaService = module.get<PrismaService>(PrismaService);
+    googlePlacesService = module.get<GooglePlacesService>(GooglePlacesService);
+    jest.clearAllMocks();
+  });
+
+  // =====================
+  // calculatePriceV2 Tests
+  // =====================
+  describe('calculatePriceV2', () => {
+    const mockCar = {
+      id: 1,
+      is_active: true,
+      base_price_per_day: 3000,
+      distance_rate_per_km: 15,
+      base_fare: 50,
+      per_km_rate: 15,
+      per_minute_rate: 2,
+      minimum_fare: 100,
+      driver: {
+        is_verified: true,
+        user: {
+          id: 10,
+          full_name: 'Test Driver',
+        },
+      },
+    };
+
+    it('should calculate RENTAL pricing for intercity trip', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue(mockCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Lahore', city_id: 1 })
+        .mockResolvedValueOnce({ city_name: 'Islamabad', city_id: 2 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(false);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 380,
+        duration_minutes: 300,
+      });
+
+      const result = await service.calculatePriceV2(1, {
+        pickup_location: 'Lahore Mall Road',
+        dropoff_location: 'Islamabad F-7',
+        booking_type: 'RENTAL',
+        start_date: '2026-06-01',
+        end_date: '2026-06-03',
+      });
+
+      expect(result.booking_type).toBe('RENTAL');
+      expect(result.detected_booking_type).toBe('RENTAL');
+      expect(result.pricing_breakdown.base_price).toBeGreaterThan(0);
+      expect(result.pricing_breakdown.distance_price).toBeGreaterThan(0);
+      expect(result.pricing_breakdown.total_amount).toBeGreaterThan(0);
+      expect(result.pricing_breakdown.platform_fee_percentage).toBe(5);
+    });
+
+    it('should calculate RIDE_HAILING pricing for same-city trip', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue(mockCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1, metropolitan_area: 'Karachi Metropolitan' })
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1, metropolitan_area: 'Karachi Metropolitan' });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(true);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 15,
+        duration_minutes: 25,
+      });
+
+      const result = await service.calculatePriceV2(1, {
+        pickup_location: 'Clifton, Karachi',
+        dropoff_location: 'Saddar, Karachi',
+        booking_type: 'RIDE_HAILING',
+        scheduled_pickup: new Date('2026-03-15T08:00:00').toISOString(),
+      });
+
+      expect(result.booking_type).toBe('RIDE_HAILING');
+      expect(result.estimated_duration).toBeGreaterThan(0);
+      expect(result.surge_multiplier).toBeGreaterThanOrEqual(1.0);
+      expect(result.pricing_breakdown.base_price).toBe(50); // Changed from base_fare to base_price
+      expect(result.pricing_breakdown.platform_fee_percentage).toBe(15);
+    });
+
+    it('should auto-detect RENTAL for intercity when booking_type not provided', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue(mockCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1 })
+        .mockResolvedValueOnce({ city_name: 'Hyderabad', city_id: 5 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(false);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 165,
+        duration_minutes: 120,
+      });
+
+      const result = await service.calculatePriceV2(1, {
+        pickup_location: 'Karachi',
+        dropoff_location: 'Hyderabad',
+        start_date: '2026-06-01',
+        end_date: '2026-06-02',
+      });
+
+      expect(result.detected_booking_type).toBe('RENTAL');
+      expect(result.booking_type).toBe('RENTAL');
+    });
+
+    it('should enforce minimum distance for very short trips', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue(mockCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1 })
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(true);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 0.2, // 200 meters
+        duration_minutes: 5,
+      });
+
+      const result = await service.calculatePriceV2(1, {
+        pickup_location: 'Block A, DHA Karachi',
+        dropoff_location: 'Block B, DHA Karachi',
+        booking_type: 'RIDE_HAILING',
+      });
+
+      // Minimum distance should be enforced (0.5 km)
+      expect(result.estimated_distance).toBeGreaterThanOrEqual(0.5);
+      expect(result.pricing_breakdown.total_amount).toBeGreaterThanOrEqual(mockCar.minimum_fare);
+    });
+
+    it('should apply surge multiplier during peak hours', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue(mockCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Lahore', city_id: 3 })
+        .mockResolvedValueOnce({ city_name: 'Lahore', city_id: 3 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(true);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 10,
+        duration_minutes: 20,
+      });
+
+      // Peak hour - Wednesday 8 AM
+      const peakTime = new Date('2026-06-03T08:00:00');
+      const result = await service.calculatePriceV2(1, {
+        pickup_location: 'Gulberg, Lahore',
+        dropoff_location: 'DHA, Lahore',
+        booking_type: 'RIDE_HAILING',
+        scheduled_pickup: peakTime.toISOString(),
+      });
+
+      expect(result.surge_multiplier).toBeGreaterThan(1.0);
+      expect(result.surge_multiplier).toBeLessThanOrEqual(1.3);
+    });
+
+    it('should warn for very long ride-hailing distances', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue(mockCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1 })
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(true);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 150, // Beyond typical ride-hailing range
+        duration_minutes: 180,
+      });
+
+      const result = await service.calculatePriceV2(1, {
+        pickup_location: 'Karachi North',
+        dropoff_location: 'Karachi South',
+        booking_type: 'RIDE_HAILING',
+      });
+
+      expect(result).toHaveProperty('distance_warning');
+      expect(result.estimated_distance).toBeGreaterThan(100);
+    });
+  });
+
+  // =====================
+  // checkCarAvailability Tests
+  // =====================
+  describe('checkCarAvailability', () => {
+    it('should return available for rental with no conflicts', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue({
+        id: 1,
+        available_for_rental: true,
+        available_for_ride_hailing: false,
+        current_mode: 'offline',
+        driver: { is_verified: true },
+        carBookings: [],
+      });
+
+      const result = await (service as any).checkCarAvailability(
+        1,
+        BookingType.RENTAL,
+        new Date('2026-06-01'),
+        new Date('2026-06-03')
+      );
+
+      expect(result.available).toBe(true);
+      expect(result.reason).toBeUndefined();
+    });
+
+    it('should return unavailable for rental with date conflict', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue({
+        id: 1,
+        available_for_rental: true,
+        driver: { is_verified: true },
+        carBookings: [{
+          id: 100,
+          booking_type: BookingType.RENTAL,
+          status: 'CONFIRMED',
+          start_date: new Date('2026-06-02'),
+          end_date: new Date('2026-06-05'),
+        }],
+      });
+
+      const result = await (service as any).checkCarAvailability(
+        1,
+        BookingType.RENTAL,
+        new Date('2026-06-01'),
+        new Date('2026-06-03')
+      );
+
+      expect(result.available).toBe(false);
+      expect(result.reason).toContain('not available');
+    });
+
+    it('should return available for ride-hailing when driver online', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue({
+        id: 1,
+        available_for_ride_hailing: true,
+        current_mode: 'ride_hailing',
+        driver: { is_verified: true },
+        carBookings: [],
+      });
+
+      const result = await (service as any).checkCarAvailability(
+        1,
+        BookingType.RIDE_HAILING
+      );
+
+      expect(result.available).toBe(true);
+    });
+
+    it('should return unavailable for ride-hailing with active ride', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue({
+        id: 1,
+        available_for_ride_hailing: true,
+        current_mode: 'ride_hailing',
+        driver: { is_verified: true },
+        carBookings: [{
+          id: 200,
+          booking_type: BookingType.RIDE_HAILING,
+          status: 'IN_PROGRESS',
+        }],
+      });
+
+      const result = await (service as any).checkCarAvailability(
+        1,
+        BookingType.RIDE_HAILING
+      );
+
+      expect(result.available).toBe(false);
+      expect(result.reason).toContain('active ride');
+    });
+
+    it('should return unavailable when car not enabled for booking type', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue({
+        id: 1,
+        available_for_ride_hailing: false,
+        current_mode: 'offline',
+        driver: { is_verified: true },
+        carBookings: [],
+      });
+
+      const result = await (service as any).checkCarAvailability(
+        1,
+        BookingType.RIDE_HAILING
+      );
+
+      expect(result.available).toBe(false);
+      expect(result.reason).toContain('not available for ride-hailing');
+    });
+  });
+
+  // =====================
+  // switchDriverMode Tests
+  // =====================
+  describe('switchDriverMode', () => {
+    it('should successfully switch to ride_hailing mode when no conflicts', async () => {
+      mockPrismaService.driver.findUnique.mockResolvedValue({
+        id: 1,
+        is_verified: true,
+        cars: [
+          {
+            id: 1,
+            current_mode: 'offline',
+            available_for_ride_hailing: true,
+            is_active: true,
+            carBookings: [],
+          },
+          {
+            id: 2,
+            current_mode: 'offline',
+            available_for_ride_hailing: true,
+            is_active: true,
+            carBookings: [],
+          },
+        ],
+      });
+      mockPrismaService.car.updateMany.mockResolvedValue({ count: 2 });
+
+      const result = await service.switchDriverMode(1, 'ride_hailing');
+
+      expect(result.success).toBe(true);
+      expect(result.mode).toBe('ride_hailing');
+      expect(result.updated_cars).toBe(2);
+      expect(mockPrismaService.car.updateMany).toHaveBeenCalledWith({
+        where: { driver_id: 1, is_active: true },
+        data: { current_mode: 'ride_hailing' },
+      });
+    });
+
+    it('should prevent switching to ride_hailing with active rental', async () => {
+      mockPrismaService.driver.findUnique.mockResolvedValue({
+        id: 1,
+        is_verified: true,
+        cars: [{
+          id: 1,
+          current_mode: 'rental',
+          carBookings: [{
+            id: 100,
+            booking_type: BookingType.RENTAL,
+            status: 'CONFIRMED',
+            start_date: new Date('2026-06-01'),
+            end_date: new Date('2026-06-05'),
+          }],
+        }],
+      });
+
+      await expect(service.switchDriverMode(1, 'ride_hailing')).rejects.toThrow();
+    });
+
+    it('should successfully switch to offline mode', async () => {
+      mockPrismaService.driver.findUnique.mockResolvedValue({
+        id: 1,
+        is_verified: true,
+        cars: [{
+          id: 1,
+          current_mode: 'ride_hailing',
+          carBookings: [],
+        }],
+      });
+      mockPrismaService.car.updateMany.mockResolvedValue({ count: 1 });
+
+      const result = await service.switchDriverMode(1, 'offline');
+
+      expect(result.success).toBe(true);
+      expect(result.mode).toBe('offline');
+    });
+
+    it('should prevent switching to rental with active ride', async () => {
+      mockPrismaService.driver.findUnique.mockResolvedValue({
+        id: 1,
+        is_verified: true,
+        cars: [{
+          id: 1,
+          current_mode: 'ride_hailing',
+          carBookings: [{
+            id: 200,
+            booking_type: BookingType.RIDE_HAILING,
+            status: 'IN_PROGRESS',
+          }],
+        }],
+      });
+
+      await expect(service.switchDriverMode(1, 'rental')).rejects.toThrow();
+    });
+  });
+
+  // =====================
+  // createBookingRequestV2 Tests
+  // =====================
+  describe('createBookingRequestV2', () => {
+    const mockCarWithDriver = {
+      id: 1,
+      is_active: true,
+      base_price_per_day: 3000,
+      distance_rate_per_km: 15,
+      base_fare: 50,
+      per_km_rate: 15,
+      per_minute_rate: 2,
+      minimum_fare: 100,
+      carModel: { make: 'Toyota', model: 'Corolla' },
+      year: 2024,
+      driver: {
+        is_verified: true,
+        user: {
+          id: 10,
+          full_name: 'Test Driver',
+          email: 'driver@test.com',
+        },
+      },
+      carBookings: [],
+    };
+
+    it('should create RENTAL booking successfully', async () => {
+      const rentalCar = {
+        ...mockCarWithDriver,
+        available_for_rental: true,
+        carBookings: [],
+      };
+      mockPrismaService.car.findUnique.mockResolvedValue(rentalCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Lahore', city_id: 3 })
+        .mockResolvedValueOnce({ city_name: 'Islamabad', city_id: 2 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(false);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 380,
+        duration_minutes: 300,
+      });
+      mockPrismaService.carBooking.create.mockResolvedValue({
+        id: 1,
+        user_id: 5,
+        car_id: 1,
+        status: 'PENDING_DRIVER_ACCEPTANCE',
+        booking_type: BookingType.RENTAL,
+        pickup_location: 'Lahore',
+        dropoff_location: 'Islamabad',
+        start_date: new Date('2026-06-01'),
+        end_date: new Date('2026-06-03'),
+        total_amount: 9000,
+        driver_earnings: 8550,
+        platform_fee: 450,
+        user: { id: 5, full_name: 'Test User', email: 'user@test.com' },
+        car: rentalCar,
+      } as any);
+
+      const result = await service.createBookingRequestV2({
+        car_id: 1,
+        user_id: 5,
+        pickup_location: 'Lahore Mall Road',
+        dropoff_location: 'Islamabad F-7',
+        booking_type: 'RENTAL',
+        start_date: '2026-06-01',
+        end_date: '2026-06-03',
+      });
+
+      expect(result.booking_type).toBe(BookingType.RENTAL);
+      expect(result.status).toBe('PENDING_DRIVER_ACCEPTANCE');
+      expect(mockPrismaService.carBooking.create).toHaveBeenCalled();
+    });
+
+    it('should create RIDE_HAILING booking successfully', async () => {
+      const rideHailingCar = {
+        ...mockCarWithDriver,
+        current_mode: 'ride_hailing',
+        available_for_ride_hailing: true,
+        carBookings: [],
+      };
+      mockPrismaService.car.findUnique.mockResolvedValue(rideHailingCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1 })
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(true);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 10,
+        duration_minutes: 20,
+      });
+      mockPrismaService.carBooking.create.mockResolvedValue({
+        id: 2,
+        user_id: 5,
+        car_id: 1,
+        status: 'PENDING_DRIVER_ACCEPTANCE',
+        booking_type: BookingType.RIDE_HAILING,
+        pickup_location: 'Clifton',
+        dropoff_location: 'Saddar',
+        scheduled_pickup: new Date(),
+        total_amount: 250,
+        driver_earnings: 212.5,
+        platform_fee: 37.5,
+        user: { id: 5, full_name: 'Test User', email: 'user@test.com' },
+        car: rideHailingCar,
+      } as any);
+
+      const result = await service.createBookingRequestV2({
+        car_id: 1,
+        user_id: 5,
+        pickup_location: 'Clifton, Karachi',
+        dropoff_location: 'Saddar, Karachi',
+        booking_type: 'RIDE_HAILING',
+      });
+
+      expect(result.booking_type).toBe(BookingType.RIDE_HAILING);
+      expect(result.status).toBe('PENDING_DRIVER_ACCEPTANCE');
+    });
+
+    it('should reject booking when car not available', async () => {
+      mockPrismaService.car.findUnique.mockResolvedValue({
+        ...mockCarWithDriver,
+        carBookings: [{
+          id: 100,
+          booking_type: BookingType.RENTAL,
+          status: 'CONFIRMED',
+          start_date: new Date('2026-06-01'),
+          end_date: new Date('2026-06-05'),
+        }],
+      });
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Lahore', city_id: 3 })
+        .mockResolvedValueOnce({ city_name: 'Islamabad', city_id: 2 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(false);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance: 380,
+        duration: 300,
+      });
+
+      await expect(service.createBookingRequestV2({
+        car_id: 1,
+        user_id: 5,
+        pickup_location: 'Lahore',
+        dropoff_location: 'Islamabad',
+        booking_type: 'RENTAL',
+        start_date: '2026-06-02',
+        end_date: '2026-06-04',
+      })).rejects.toThrow();
+    });
+  });
+
+  // =====================
+  // Integration Flow Tests
+  // =====================
+  describe('End-to-End Booking Flow', () => {
+    it('should complete entire rental booking flow', async () => {
+      // Step 1: Calculate price
+      const mockCar = {
+        id: 1,
+        is_active: true,
+        base_price_per_day: 3000,
+        distance_rate_per_km: 15,
+        driver: {
+          is_verified: true,
+          user: { id: 10, full_name: 'Test Driver' },
+        },
+      };
+      mockPrismaService.car.findUnique.mockResolvedValue(mockCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Lahore', city_id: 3 })
+        .mockResolvedValueOnce({ city_name: 'Karachi', city_id: 1 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(false);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 1200,
+        duration_minutes: 720,
+      });
+
+      const priceResult = await service.calculatePriceV2(1, {
+        pickup_location: 'Lahore',
+        dropoff_location: 'Karachi',
+        booking_type: 'RENTAL',
+        start_date: '2026-07-01',
+        end_date: '2026-07-05',
+      });
+
+      expect(priceResult.booking_type).toBe('RENTAL');
+      expect(priceResult.pricing_breakdown.total_amount).toBeGreaterThan(0);
+
+      // Step 2: Check availability
+      mockPrismaService.car.findUnique.mockResolvedValue({
+        ...mockCar,
+        available_for_rental: true,
+        driver: { is_verified: true },
+        carBookings: [],
+      });
+
+      const availability = await (service as any).checkCarAvailability(
+        1,
+        BookingType.RENTAL,
+        new Date('2026-07-01'),
+        new Date('2026-07-05')
+      );
+
+      expect(availability.available).toBe(true);
+    });
+
+    it('should complete entire ride-hailing booking flow', async () => {
+      const mockCar = {
+        id: 2,
+        is_active: true,
+        current_mode: 'ride_hailing',
+        available_for_ride_hailing: true,
+        base_fare: 50,
+        per_km_rate: 15,
+        per_minute_rate: 2,
+        minimum_fare: 100,
+        driver: {
+          is_verified: true,
+          user: { id: 15, full_name: 'Ride Driver' },
+        },
+      };
+
+      mockPrismaService.car.findUnique.mockResolvedValue(mockCar);
+      mockGooglePlacesService.getCityFromAddress
+        .mockResolvedValueOnce({ city_name: 'Lahore', city_id: 3 })
+        .mockResolvedValueOnce({ city_name: 'Lahore', city_id: 3 });
+      mockGooglePlacesService.areSameMetropolitanArea.mockReturnValue(true);
+      mockGooglePlacesService.getDistanceAndDuration.mockResolvedValue({
+        distance_km: 12,
+        duration_minutes: 25,
+      });
+
+      const priceResult = await service.calculatePriceV2(2, {
+        pickup_location: 'Gulberg, Lahore',
+        dropoff_location: 'Model Town, Lahore',
+        booking_type: 'RIDE_HAILING',
+      });
+
+      expect(priceResult.booking_type).toBe('RIDE_HAILING');
+      expect(priceResult.surge_multiplier).toBeGreaterThanOrEqual(1.0);
+      expect(priceResult.pricing_breakdown.platform_fee_percentage).toBe(15);
+    });
   });
 });

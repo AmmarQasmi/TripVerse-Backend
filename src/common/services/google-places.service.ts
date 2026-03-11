@@ -7,6 +7,10 @@ export interface CityInfo {
   city_name: string;
   city_id?: number;
   metropolitan_area?: string; // For twin/metro cities like Islamabad-Rawalpindi
+  // All administrative levels for robust comparison
+  locality?: string;
+  admin_area_level_2?: string;
+  admin_area_level_1?: string;
 }
 
 export interface DistanceAndDuration {
@@ -507,29 +511,32 @@ export class GooglePlacesService {
         const result = response.data.results[0];
         const addressComponents = result.address_components || [];
 
-        // Extract city name from address components
-        // Priority: locality > administrative_area_level_2 > administrative_area_level_1
-        let cityName: string | null = null;
+        // Extract all administrative levels for robust comparison
+        let locality: string | null = null;
+        let adminArea2: string | null = null;
+        let adminArea1: string | null = null;
 
         for (const component of addressComponents) {
           if (component.types.includes('locality')) {
-            cityName = component.long_name;
-            break;
+            locality = component.long_name;
           }
-          if (component.types.includes('administrative_area_level_2') && !cityName) {
-            cityName = component.long_name;
+          if (component.types.includes('administrative_area_level_2')) {
+            adminArea2 = component.long_name;
           }
-          if (component.types.includes('administrative_area_level_1') && !cityName) {
-            cityName = component.long_name;
+          if (component.types.includes('administrative_area_level_1')) {
+            adminArea1 = component.long_name;
           }
         }
+
+        // For city name, prefer locality, then admin_area_level_2, then admin_area_level_1
+        const cityName = locality || adminArea2 || adminArea1;
 
         if (!cityName) {
           this.logger.warn(`Could not extract city from address: ${address}`);
           return null;
         }
 
-        this.logger.log(`Extracted city: ${cityName}`);
+        this.logger.log(`Extracted city: ${cityName} (locality=${locality}, admin2=${adminArea2}, admin1=${adminArea1})`);
 
         // Try to match against database
         const cityFromDb = await this.prisma.city.findFirst({
@@ -541,13 +548,18 @@ export class GooglePlacesService {
           },
         });
 
-        // Detect metropolitan area
-        const metropolitanArea = this.getMetropolitanArea(cityName);
+        // Detect metropolitan area - check all levels
+        const metropolitanArea = this.getMetropolitanArea(cityName)
+          || (adminArea2 ? this.getMetropolitanArea(adminArea2) : undefined)
+          || (locality && locality !== cityName ? this.getMetropolitanArea(locality) : undefined);
 
         const cityInfo: CityInfo = {
           city_name: cityName,
           city_id: cityFromDb?.id,
           metropolitan_area: metropolitanArea,
+          locality: locality || undefined,
+          admin_area_level_2: adminArea2 || undefined,
+          admin_area_level_1: adminArea1 || undefined,
         };
 
         // Cache the result
@@ -556,12 +568,60 @@ export class GooglePlacesService {
         return cityInfo;
       }
 
-      this.logger.warn(`Geocoding failed for address: ${address} (${response.data?.status})`);
-      return null;
+      this.logger.warn(`Geocoding failed for address: ${address} (${response.data?.status}), falling back to text parsing`);
+      return this.extractCityFromText(address);
     } catch (error) {
       this.logger.error('Error getting city from address:', (error as Error).message);
-      return null;
+      return this.extractCityFromText(address);
     }
+  }
+
+  /**
+   * Fallback: extract city name from address text when Geocoding API fails
+   * Addresses from Google Places autocomplete follow the pattern: "Location, Area, City, Country"
+   * e.g. "Johar Mor Bridge, Block 10 A Gulistan-e-Johar, Karachi, Pakistan"
+   */
+  private async extractCityFromText(address: string): Promise<CityInfo | null> {
+    const parts = address.split(',').map(p => p.trim()).filter(p => p.length > 0);
+    if (parts.length < 2) return null;
+
+    // Known country names to skip
+    const countryNames = ['pakistan', 'india', 'bangladesh', 'sri lanka'];
+    // Known province/state names to skip
+    const provinceNames = ['sindh', 'punjab', 'balochistan', 'kpk', 'khyber pakhtunkhwa', 
+      'islamabad capital territory', 'gilgit-baltistan', 'azad kashmir'];
+
+    // Walk from the end (last part is usually Country, second-to-last is City)
+    let cityName: string | null = null;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const part = parts[i].toLowerCase();
+      if (countryNames.includes(part)) continue;
+      if (provinceNames.includes(part)) continue;
+      cityName = parts[i];
+      break;
+    }
+
+    if (!cityName) return null;
+
+    this.logger.log(`Fallback city extraction from text: "${cityName}" from "${address}"`);
+
+    // Try to match against database
+    const cityFromDb = await this.prisma.city.findFirst({
+      where: {
+        OR: [
+          { name: { equals: cityName, mode: 'insensitive' } },
+          { name: { contains: cityName, mode: 'insensitive' } },
+        ],
+      },
+    });
+
+    const metropolitanArea = this.getMetropolitanArea(cityName);
+
+    return {
+      city_name: cityName,
+      city_id: cityFromDb?.id,
+      metropolitan_area: metropolitanArea,
+    };
   }
 
   /**
@@ -585,12 +645,12 @@ export class GooglePlacesService {
   areSameMetropolitanArea(city1: CityInfo | null, city2: CityInfo | null): boolean {
     if (!city1 || !city2) return false;
     
-    // Same city
+    // Same city by database ID
     if (city1.city_id && city2.city_id && city1.city_id === city2.city_id) {
       return true;
     }
     
-    // Same name
+    // Same city name
     if (city1.city_name.toLowerCase() === city2.city_name.toLowerCase()) {
       return true;
     }
@@ -599,6 +659,25 @@ export class GooglePlacesService {
     if (city1.metropolitan_area && city2.metropolitan_area && 
         city1.metropolitan_area === city2.metropolitan_area) {
       return true;
+    }
+    
+    // Compare administrative_area_level_2 (broader city/district) - handles sub-localities
+    // e.g., locality might be "Gulistan-e-Johar Town" but admin_level_2 is "Karachi Division" for both
+    if (city1.admin_area_level_2 && city2.admin_area_level_2 &&
+        city1.admin_area_level_2.toLowerCase() === city2.admin_area_level_2.toLowerCase()) {
+      return true;
+    }
+    
+    // Cross-check: one city's name might match the other's admin area
+    const allNames1 = [city1.city_name, city1.locality, city1.admin_area_level_2].filter(Boolean).map(n => n!.toLowerCase());
+    const allNames2 = [city2.city_name, city2.locality, city2.admin_area_level_2].filter(Boolean).map(n => n!.toLowerCase());
+    
+    for (const n1 of allNames1) {
+      for (const n2 of allNames2) {
+        if (n1 === n2) return true;
+        // Check if one contains the other (e.g., "Karachi East" contains "Karachi")
+        if (n1.includes(n2) || n2.includes(n1)) return true;
+      }
     }
     
     return false;

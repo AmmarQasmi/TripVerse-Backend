@@ -31,6 +31,7 @@ interface DetectedCities {
 	pickup_city_name?: string;
 	dropoff_city_id?: number;
 	dropoff_city_name?: string;
+	same_city: boolean;
 }
 
 interface RentalPriceResult {
@@ -398,6 +399,17 @@ export class CarsService {
 			pricing: {
 				base_price_per_day: parseFloat(car.base_price_per_day.toString()),
 				distance_rate_per_km: parseFloat(car.distance_rate_per_km.toString()),
+				...(car.available_for_ride_hailing && {
+					base_fare: car.base_fare ? parseFloat(car.base_fare.toString()) : null,
+					per_km_rate: car.per_km_rate ? parseFloat(car.per_km_rate.toString()) : null,
+					per_minute_rate: car.per_minute_rate ? parseFloat(car.per_minute_rate.toString()) : null,
+					minimum_fare: car.minimum_fare ? parseFloat(car.minimum_fare.toString()) : null,
+				}),
+			},
+			availability: {
+				available_for_rental: car.available_for_rental,
+				available_for_ride_hailing: car.available_for_ride_hailing,
+				current_mode: car.current_mode,
 			},
 			images: car.images.map((img) => img.image_url),
 			is_active: car.is_active,
@@ -1864,20 +1876,28 @@ export class CarsService {
 			this.googlePlacesService.getCityFromAddress(dropoffLocation),
 		]);
 
-		const detectedCities: DetectedCities = {
-			pickup_city_id: pickupCity?.city_id,
-			pickup_city_name: pickupCity?.city_name,
-			dropoff_city_id: dropoffCity?.city_id,
-			dropoff_city_name: dropoffCity?.city_name,
-		};
-
 		// If we can't detect cities, default to RENTAL (safer assumption)
 		if (!pickupCity || !dropoffCity) {
+			const detectedCities: DetectedCities = {
+				pickup_city_id: pickupCity?.city_id,
+				pickup_city_name: pickupCity?.city_name,
+				dropoff_city_id: dropoffCity?.city_id,
+				dropoff_city_name: dropoffCity?.city_name,
+				same_city: false,
+			};
 			return { bookingType: BookingType.RENTAL, detectedCities };
 		}
 
 		// Use metropolitan area check for twin cities (e.g., Islamabad-Rawalpindi)
 		const isSameArea = this.googlePlacesService.areSameMetropolitanArea(pickupCity, dropoffCity);
+
+		const detectedCities: DetectedCities = {
+			pickup_city_id: pickupCity.city_id,
+			pickup_city_name: pickupCity.city_name,
+			dropoff_city_id: dropoffCity.city_id,
+			dropoff_city_name: dropoffCity.city_name,
+			same_city: isSameArea,
+		};
 
 		return {
 			bookingType: isSameArea ? BookingType.RIDE_HAILING : BookingType.RENTAL,
@@ -2242,6 +2262,15 @@ export class CarsService {
 				pricing: {
 					base_price_per_day: parseFloat(car.base_price_per_day.toString()),
 					distance_rate_per_km: parseFloat(car.distance_rate_per_km.toString()),
+					// Ride-hailing pricing
+					base_fare: car.base_fare ? parseFloat(car.base_fare.toString()) : null,
+					per_km_rate: car.per_km_rate ? parseFloat(car.per_km_rate.toString()) : null,
+					per_minute_rate: car.per_minute_rate ? parseFloat(car.per_minute_rate.toString()) : null,
+					minimum_fare: car.minimum_fare ? parseFloat(car.minimum_fare.toString()) : null,
+				},
+				availability: {
+					available_for_rental: car.available_for_rental,
+					available_for_ride_hailing: car.available_for_ride_hailing,
 				},
 				images: car.images.map((img) => img.image_url),
 				is_active: car.is_active,
@@ -2308,12 +2337,38 @@ export class CarsService {
 			throw new BadRequestException('Seats must be between 2 and 8');
 		}
 
-		if (data.base_price_per_day <= 0) {
-			throw new BadRequestException('Base price must be positive');
+		// Validate availability modes
+		const availableForRental = data.available_for_rental ?? true;
+		const availableForRideHailing = data.available_for_ride_hailing ?? false;
+
+		if (!availableForRental && !availableForRideHailing) {
+			throw new BadRequestException('At least one availability mode must be enabled');
 		}
 
-		if (data.distance_rate_per_km < 0) {
-			throw new BadRequestException('Distance rate cannot be negative');
+		// Validate rental pricing if rental mode is enabled
+		if (availableForRental) {
+			if (data.base_price_per_day <= 0) {
+				throw new BadRequestException('Base price must be positive when rental mode is enabled');
+			}
+			if (data.distance_rate_per_km < 0) {
+				throw new BadRequestException('Distance rate cannot be negative');
+			}
+		}
+
+		// Validate ride-hailing pricing if ride-hailing mode is enabled
+		if (availableForRideHailing) {
+			if (!data.base_fare || data.base_fare <= 0) {
+				throw new BadRequestException('Base fare must be positive when ride-hailing mode is enabled');
+			}
+			if (!data.per_km_rate || data.per_km_rate <= 0) {
+				throw new BadRequestException('Per KM rate must be positive when ride-hailing mode is enabled');
+			}
+			if (data.per_minute_rate === undefined || data.per_minute_rate < 0) {
+				throw new BadRequestException('Per minute rate cannot be negative');
+			}
+			if (!data.minimum_fare || data.minimum_fare <= 0) {
+				throw new BadRequestException('Minimum fare must be positive when ride-hailing mode is enabled');
+			}
 		}
 
 		const currentYear = new Date().getFullYear();
@@ -2339,8 +2394,8 @@ export class CarsService {
 					driver_id: driver.id,
 					car_model_id: carModel.id,
 					seats: data.seats,
-					base_price_per_day: data.base_price_per_day,
-					distance_rate_per_km: data.distance_rate_per_km,
+					base_price_per_day: data.base_price_per_day || 0,
+					distance_rate_per_km: data.distance_rate_per_km || 0,
 					transmission: data.transmission,
 					fuel_type: data.fuel_type,
 					year: data.year,
@@ -2348,6 +2403,14 @@ export class CarsService {
 					license_plate: data.license_plate,
 					is_active: true, // Cars are active by default when created
 					is_listed: true, // Cars are listed by default
+					// Dual-mode availability
+					available_for_rental: availableForRental,
+					available_for_ride_hailing: availableForRideHailing,
+					// Ride-hailing pricing
+					base_fare: data.base_fare || null,
+					per_km_rate: data.per_km_rate || null,
+					per_minute_rate: data.per_minute_rate || null,
+					minimum_fare: data.minimum_fare || null,
 				},
 			});
 
@@ -2416,12 +2479,48 @@ export class CarsService {
 			throw new BadRequestException('Seats must be between 2 and 8');
 		}
 
-		if (data.base_price_per_day !== undefined && data.base_price_per_day <= 0) {
-			throw new BadRequestException('Base price must be positive');
+		// Validate availability modes
+		const availableForRental = data.available_for_rental ?? car.available_for_rental;
+		const availableForRideHailing = data.available_for_ride_hailing ?? car.available_for_ride_hailing;
+
+		if (!availableForRental && !availableForRideHailing) {
+			throw new BadRequestException('At least one availability mode must be enabled');
 		}
 
-		if (data.distance_rate_per_km !== undefined && data.distance_rate_per_km < 0) {
-			throw new BadRequestException('Distance rate cannot be negative');
+		// Validate rental pricing if rental mode is enabled
+		if (availableForRental) {
+			const basePricePerDay = data.base_price_per_day ?? car.base_price_per_day;
+			if (basePricePerDay <= 0) {
+				throw new BadRequestException('Base price must be positive when rental mode is enabled');
+			}
+
+			const distanceRate = data.distance_rate_per_km ?? car.distance_rate_per_km;
+			if (distanceRate < 0) {
+				throw new BadRequestException('Distance rate cannot be negative');
+			}
+		}
+
+		// Validate ride-hailing pricing if ride-hailing mode is enabled
+		if (availableForRideHailing) {
+			const baseFare = data.base_fare ?? car.base_fare;
+			if (!baseFare || baseFare <= 0) {
+				throw new BadRequestException('Base fare must be positive when ride-hailing mode is enabled');
+			}
+
+			const perKmRate = data.per_km_rate ?? car.per_km_rate;
+			if (!perKmRate || perKmRate <= 0) {
+				throw new BadRequestException('Per KM rate must be positive when ride-hailing mode is enabled');
+			}
+
+			const perMinuteRate = data.per_minute_rate ?? car.per_minute_rate;
+			if (perMinuteRate === undefined || perMinuteRate < 0) {
+				throw new BadRequestException('Per minute rate cannot be negative');
+			}
+
+			const minimumFare = data.minimum_fare ?? car.minimum_fare;
+			if (!minimumFare || minimumFare <= 0) {
+				throw new BadRequestException('Minimum fare must be positive when ride-hailing mode is enabled');
+			}
 		}
 
 		if (data.year !== undefined) {
@@ -2479,6 +2578,14 @@ export class CarsService {
 				color: data.color,
 				license_plate: data.license_plate,
 				is_active: data.is_active,
+				// Dual-mode availability
+				available_for_rental: data.available_for_rental,
+				available_for_ride_hailing: data.available_for_ride_hailing,
+				// Ride-hailing pricing
+				base_fare: data.base_fare,
+				per_km_rate: data.per_km_rate,
+				per_minute_rate: data.per_minute_rate,
+				minimum_fare: data.minimum_fare,
 			},
 		});
 
