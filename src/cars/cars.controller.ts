@@ -513,4 +513,44 @@ export class CarsController {
 		return this.carsService.getOptimizedCarImages(carId);
 	}
 
+	// ─── Driver Reviews ───────────────────────────────────────────────────────
+
+	/**
+	 * Check if user can review driver for a booking
+	 * GET /cars/bookings/:id/can-review
+	 */
+	@Get('bookings/:id/can-review')
+	@UseGuards(JwtAuthGuard)
+	async canReviewDriver(@Param('id', ParseIntPipe) bookingId: number, @Request() req: any) {
+		return this.carsService.canUserReviewDriver(req.user.id, bookingId);
+	}
+
+	/**
+	 * Submit a review for the driver of a completed booking
+	 * POST /cars/bookings/:id/review
+	 */
+	@Post('bookings/:id/review')
+	@UseGuards(JwtAuthGuard, RolesGuard)
+	@Roles(Role.client)
+	async createDriverReview(
+		@Param('id', ParseIntPipe) bookingId: number,
+		@Request() req: any,
+		@Body() body: { rating: number; comment?: string },
+	) {
+		return this.carsService.createDriverReview(req.user.id, bookingId, body);
+	}
+
+	/**
+	 * Get reviews for a driver
+	 * GET /cars/drivers/:driverId/reviews
+	 */
+	@Get('drivers/:driverId/reviews')
+	async getDriverReviews(
+		@Param('driverId', ParseIntPipe) driverId: number,
+		@Query('page') page?: string,
+		@Query('limit') limit?: string,
+	) {
+		return this.carsService.getDriverReviews(driverId, page ? +page : 1, limit ? +limit : 10);
+	}
+
 }

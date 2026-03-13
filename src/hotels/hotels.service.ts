@@ -1486,12 +1486,12 @@ export class HotelsService {
 			throw new NotFoundException('Hotel not found');
 		}
 
-		// Check if user has a completed/confirmed booking
+		// Check if user has a confirmed booking
 		const completedBooking = await this.prisma.hotelBooking.findFirst({
 			where: {
 				user_id: userId,
 				hotel_id: hotelId,
-				status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
+				status: { in: ['CONFIRMED'] },
 			},
 		});
 
@@ -1565,7 +1565,7 @@ export class HotelsService {
 			where: {
 				user_id: userId,
 				hotel_id: hotelId,
-				status: { in: ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'] },
+				status: { in: ['CONFIRMED'] },
 			},
 		});
 

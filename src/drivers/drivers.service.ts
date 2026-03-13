@@ -299,7 +299,19 @@ export class DriversService {
 			throw new NotFoundException('Driver profile not found');
 		}
 
-		return driver;
+		const reviewStats = await this.prisma.driverReview.aggregate({
+			where: { driver_id: driver.id },
+			_avg: { rating: true },
+			_count: { id: true },
+		});
+
+		return {
+			...driver,
+			avg_in_app_rating: reviewStats._avg.rating
+				? Number(reviewStats._avg.rating.toFixed(1))
+				: null,
+			total_in_app_reviews: reviewStats._count.id,
+		};
 	}
 
 	// Admin: Get all drivers pending verification

@@ -1378,6 +1378,11 @@ export class AdminService {
 			throw new BadRequestException('Cannot provide both booking_hotel_id and booking_car_id');
 		}
 
+		// Hotel bookings no longer support disputes — use the review system instead
+		if (booking_hotel_id) {
+			throw new BadRequestException('Hotel booking disputes are not supported. Please leave a review for your experience.');
+		}
+
 		// Safety / fraud complaints require at least some evidence
 		if ((categories.includes('safety') || categories.includes('fraud')) && evidenceFiles.length === 0) {
 			throw new BadRequestException(
