@@ -3458,4 +3458,147 @@ export class CarsService {
 				: 'Ride-hailing settings updated',
 		};
 	}
+
+	// ─── Driver Reviews ───────────────────────────────────────────────────────
+
+	/**
+	 * Check if the authenticated user can review the driver for a specific booking
+	 */
+	async canUserReviewDriver(userId: number, bookingId: number) {
+		const booking = await this.prisma.carBooking.findFirst({
+			where: {
+				id: bookingId,
+				user_id: userId,
+				status: 'COMPLETED',
+			},
+		});
+
+		if (!booking) {
+			return { can_review: false, reason: 'No completed booking found' };
+		}
+
+		const existingReview = await this.prisma.driverReview.findUnique({
+			where: { booking_id: bookingId },
+		});
+
+		if (existingReview) {
+			return { can_review: false, reason: 'Already reviewed' };
+		}
+
+		return { can_review: true };
+	}
+
+	/**
+	 * Create a review for the driver of a completed booking
+	 */
+	async createDriverReview(
+		userId: number,
+		bookingId: number,
+		dto: { rating: number; comment?: string },
+	) {
+		if (dto.rating < 1 || dto.rating > 5) {
+			throw new BadRequestException('Rating must be between 1 and 5');
+		}
+
+		const booking = await this.prisma.carBooking.findFirst({
+			where: {
+				id: bookingId,
+				user_id: userId,
+				status: 'COMPLETED',
+			},
+			include: {
+				car: {
+					include: { driver: { include: { user: true } } },
+				},
+			},
+		});
+
+		if (!booking) {
+			throw new NotFoundException('Completed booking not found');
+		}
+
+		const existingReview = await this.prisma.driverReview.findUnique({
+			where: { booking_id: bookingId },
+		});
+
+		if (existingReview) {
+			throw new BadRequestException('You have already reviewed this trip');
+		}
+
+		const review = await this.prisma.driverReview.create({
+			data: {
+				booking_id: bookingId,
+				driver_id: booking.car.driver.id,
+				user_id: userId,
+				rating: dto.rating,
+				comment: dto.comment,
+			},
+			include: {
+				user: { select: { id: true, full_name: true } },
+			},
+		});
+
+		// Notify the driver
+		try {
+			await this.notificationsService.notifyDriverReviewReceived(
+				booking.car.driver.user_id,
+				bookingId,
+				dto.rating,
+			);
+		} catch (_) {
+			// Don't fail review creation if notification fails
+		}
+
+		return {
+			id: review.id,
+			rating: review.rating,
+			comment: review.comment,
+			created_at: review.created_at.toISOString(),
+			user: { id: review.user.id, name: review.user.full_name },
+		};
+	}
+
+	/**
+	 * Get paginated reviews for a driver
+	 */
+	async getDriverReviews(driverId: number, page = 1, limit = 10) {
+		const skip = (page - 1) * limit;
+
+		const [reviews, total] = await Promise.all([
+			this.prisma.driverReview.findMany({
+				where: { driver_id: driverId },
+				include: {
+					user: { select: { id: true, full_name: true } },
+				},
+				orderBy: { created_at: 'desc' },
+				skip,
+				take: limit,
+			}),
+			this.prisma.driverReview.count({ where: { driver_id: driverId } }),
+		]);
+
+		const avg = total > 0
+			? await this.prisma.driverReview.aggregate({
+				where: { driver_id: driverId },
+				_avg: { rating: true },
+			})
+			: null;
+
+		return {
+			reviews: reviews.map((r) => ({
+				id: r.id,
+				rating: r.rating,
+				comment: r.comment,
+				created_at: r.created_at.toISOString(),
+				user: { id: r.user.id, name: r.user.full_name },
+			})),
+			avg_rating: avg?._avg?.rating ? Number(avg._avg.rating.toFixed(1)) : null,
+			total,
+			pagination: {
+				page,
+				limit,
+				pages: Math.ceil(total / limit),
+			},
+		};
+	}
 }

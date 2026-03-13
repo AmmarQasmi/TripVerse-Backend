@@ -60,6 +60,7 @@ model User {
   aiChatSessions                AiChatSession[]
   generatedItineraries          GeneratedItinerary[]
   hotelReviews                  HotelReview[]
+  driverReviews                 DriverReview[]
 
   @@index([city_id])
   @@index([status])
@@ -97,6 +98,7 @@ model Driver {
   documents             DriverDocument[]
   ratings               DriverRating[]
   disciplinary_actions  DriverDisciplinaryAction[]
+  reviews               DriverReview[]
 
   @@index([is_verified])
 }
@@ -250,6 +252,23 @@ model HotelReview {
   @@map("hotel_reviews")
 }
 
+model DriverReview {
+  id         Int        @id @default(autoincrement())
+  driver_id  Int
+  booking_id Int        @unique
+  user_id    Int
+  rating     Int
+  comment    String?
+  created_at DateTime   @default(now())
+  booking    CarBooking @relation(fields: [booking_id], references: [id], onDelete: Cascade)
+  driver     Driver     @relation(fields: [driver_id], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@index([driver_id, created_at])
+  @@index([user_id])
+  @@map("driver_reviews")
+}
+
 model Car {
   id                         Int              @id @default(autoincrement())
   driver_id                  Int
@@ -370,6 +389,7 @@ model CarBooking {
   user                                  User                 @relation("UserCarBookings", fields: [user_id], references: [id], onDelete: Cascade)
   chat                                  Chat?
   dispute                               Dispute?
+  driverReview                          DriverReview?
   payments                              PaymentTransaction[]
 
   @@index([user_id, created_at])
@@ -777,6 +797,7 @@ enum NotificationType {
   hotel_booking_confirmed
   hotel_booking_payment_received
   hotel_review_received
+  driver_review_received
   chat_message
   dispute_auto_action
   dispute_flagged

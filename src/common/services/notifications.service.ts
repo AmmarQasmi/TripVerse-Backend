@@ -263,6 +263,19 @@ export class NotificationsService {
 	}
 
 	/**
+	 * Create notification for driver review received
+	 */
+	async notifyDriverReviewReceived(driverUserId: number, bookingId: number, rating: number): Promise<void> {
+		await this.createNotification(
+			driverUserId,
+			'driver_review_received',
+			'New Review Received',
+			`You received a ${rating}-star review from a passenger`,
+			{ booking_id: bookingId, booking_type: 'car' },
+		);
+	}
+
+	/**
 	 * Create notification for hotel manager verification approved
 	 */
 	async notifyHotelManagerVerificationApproved(
