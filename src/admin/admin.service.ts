@@ -13,6 +13,7 @@ import { ResolveDisputeDto } from './dto/resolve-dispute.dto';
 import { DriverFiltersDto } from './dto/driver-filters.dto';
 import { DisputeFiltersDto } from './dto/dispute-filters.dto';
 import { AccountStatus, DisputeCategory, DisputeStatus, NotificationType } from '@prisma/client';
+import { WalletService, TransactionType } from '../payments/wallet.service';
 
 /** Set to 'true' to automatically enforce engine actions (warnings, fines, suspensions). */
 const AUTO_ENFORCEMENT_ENABLED = process.env.AUTO_DISPUTE_ENFORCEMENT === 'true';
@@ -27,6 +28,7 @@ export class AdminService {
 		private notificationsService: CommonNotificationsService,
 		private cloudinaryService: CloudinaryService,
 		private ruleEngine: DisputeRuleEngineService,
+		private walletService: WalletService,
 	) {}
 
 	/**
@@ -1275,12 +1277,28 @@ export class AdminService {
 							id: dispute.bookingHotel?.id,
 							customer: dispute.bookingHotel?.user,
 							hotel: dispute.bookingHotel?.hotel,
+							financials: {
+								total_amount: dispute.bookingHotel?.total_amount
+									? parseFloat(dispute.bookingHotel.total_amount.toString())
+									: 0,
+							},
 						}
 					: {
 							id: dispute.bookingCar?.id,
 							customer: dispute.bookingCar?.user,
 							car: dispute.bookingCar?.car,
 							driver: dispute.bookingCar?.car.driver.user,
+							financials: {
+								total_amount: dispute.bookingCar?.total_amount
+									? parseFloat(dispute.bookingCar.total_amount.toString())
+									: 0,
+								driver_earnings: dispute.bookingCar?.driver_earnings
+									? parseFloat(dispute.bookingCar.driver_earnings.toString())
+									: 0,
+								platform_fee: dispute.bookingCar?.platform_fee
+									? parseFloat(dispute.bookingCar.platform_fee.toString())
+									: 0,
+							},
 						},
 					raised_by: dispute.raised_by,
 				category: dispute.category,
@@ -1297,6 +1315,121 @@ export class AdminService {
 				fine_amount: dispute.fine_amount,
 				booking_car_id: dispute.booking_car_id,
 				booking_hotel_id: dispute.booking_hotel_id,
+				attachments: dispute.attachments,
+				created_at: dispute.created_at.toISOString(),
+				resolved_at: dispute.resolved_at?.toISOString() || null,
+			})),
+			pagination: {
+				page,
+				limit,
+				total,
+				total_pages: Math.ceil(total / limit),
+			},
+		};
+	}
+
+	/**
+	 * Get disputes filed by current customer
+	 */
+	async getMyDisputes(reporterUserId: number, filters: DisputeFiltersDto) {
+		const { page = 1, limit = 20, status, booking_type } = filters;
+
+		const where: any = {
+			reporter_user_id: reporterUserId,
+		};
+
+		if (status) {
+			where.status = status as DisputeStatus;
+		}
+
+		if (booking_type === 'hotel') {
+			where.booking_hotel_id = { not: null };
+		} else if (booking_type === 'car') {
+			where.booking_car_id = { not: null };
+		}
+
+		const [disputes, total] = await Promise.all([
+			this.prisma.dispute.findMany({
+				where,
+				include: {
+					bookingHotel: {
+						include: {
+							hotel: {
+								select: {
+									id: true,
+									name: true,
+								},
+							},
+						},
+					},
+					bookingCar: {
+						include: {
+							car: {
+								include: {
+									carModel: true,
+									driver: {
+										include: {
+											user: {
+												select: {
+													id: true,
+													full_name: true,
+													email: true,
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					attachments: true,
+				},
+				orderBy: { created_at: 'desc' },
+				skip: (page - 1) * limit,
+				take: limit,
+			}),
+			this.prisma.dispute.count({ where }),
+		]);
+
+		return {
+			data: disputes.map((dispute) => ({
+				id: dispute.id,
+				booking_type: dispute.booking_hotel_id ? 'hotel' : 'car',
+				booking: dispute.booking_hotel_id
+					? {
+							id: dispute.bookingHotel?.id,
+							hotel: dispute.bookingHotel?.hotel,
+							financials: {
+								total_amount: dispute.bookingHotel?.total_amount
+									? parseFloat(dispute.bookingHotel.total_amount.toString())
+									: 0,
+							},
+						}
+					: {
+							id: dispute.bookingCar?.id,
+							car: dispute.bookingCar?.car,
+							driver: dispute.bookingCar?.car.driver.user,
+							financials: {
+								total_amount: dispute.bookingCar?.total_amount
+									? parseFloat(dispute.bookingCar.total_amount.toString())
+									: 0,
+								driver_earnings: dispute.bookingCar?.driver_earnings
+									? parseFloat(dispute.bookingCar.driver_earnings.toString())
+									: 0,
+								platform_fee: dispute.bookingCar?.platform_fee
+									? parseFloat(dispute.bookingCar.platform_fee.toString())
+									: 0,
+							},
+						},
+				category: dispute.category,
+				extra_categories: dispute.extra_categories,
+				description: dispute.description,
+				status: dispute.status,
+				resolution: dispute.resolution,
+				incident_at: dispute.incident_at?.toISOString() || null,
+				severity_score: dispute.severity_score,
+				score_breakdown: dispute.score_breakdown,
+				fine_amount: dispute.fine_amount,
 				attachments: dispute.attachments,
 				created_at: dispute.created_at.toISOString(),
 				resolved_at: dispute.resolved_at?.toISOString() || null,
@@ -1762,6 +1895,7 @@ export class AdminService {
 
 		const scoreBreakdown = dispute.score_breakdown as any;
 		const fineAmount = dto.fine_amount ?? scoreBreakdown?.suggested_fine ?? 0;
+		const fineAmountInPaisa = BigInt(Math.max(0, Math.round(fineAmount * 100)));
 
 		// ── Resolve provider user ID ───────────────────────────────────────────
 		let providerUserId: number | null = null;
@@ -1786,34 +1920,120 @@ export class AdminService {
 			await this.prisma.$executeRaw`UPDATE "Dispute" SET fine_amount = ${fineAmount} WHERE id = ${disputeId}`;
 		}
 
-		// ── Process fine: deduct from provider wallet, credit admin ───────────
-		if (fineAmount > 0 && providerUserId) {
-			const adminUser = await this.prisma.user.findFirst({
-				where: { role: 'admin' },
-				select: { id: true },
-			});
-			// Wallet updates via raw SQL (wallet_balance is a new column)
-			await this.prisma.$executeRaw`UPDATE "User" SET wallet_balance = wallet_balance - ${fineAmount} WHERE id = ${providerUserId}`;
-			if (adminUser) {
-				await this.prisma.$executeRaw`UPDATE "User" SET wallet_balance = wallet_balance + ${fineAmount} WHERE id = ${adminUser.id}`;
-			}
-		}
-
 		// ── Notify customer ────────────────────────────────────────────────────
 		const customerUserId = dispute.booking_hotel_id
 			? dispute.bookingHotel?.user_id
 			: dispute.bookingCar?.user_id;
 
+		// ── Financial enforcement (approved complaint) ────────────────────────
+		let chargedFromWallet = 0n;
+		let createdDebt = 0n;
+		let refundedToCustomer = 0n;
+
+		if (fineAmountInPaisa > 0n && customerUserId) {
+			const customerWallet = await this.walletService.ensureWallet(customerUserId, 'client');
+			await this.walletService.addBalance(
+				customerWallet.id,
+				fineAmountInPaisa,
+				TransactionType.REFUND,
+				{
+					disputeId,
+					type: 'dispute_approved_refund',
+					bookingId: dispute.booking_car_id || dispute.booking_hotel_id,
+				},
+			);
+
+			await this.prisma.disputeRefund.create({
+				data: {
+					dispute_id: disputeId,
+					wallet_id: customerWallet.id,
+					amount: fineAmountInPaisa,
+					refund_type: 'complaint_refund',
+					status: 'completed',
+					processed_at: new Date(),
+				},
+			});
+
+			refundedToCustomer = fineAmountInPaisa;
+		}
+
+		if (fineAmountInPaisa > 0n && providerUserId) {
+			const providerUserType = dispute.booking_car_id ? 'driver' : 'hotel_manager';
+			const providerWallet = await this.walletService.ensureWallet(providerUserId, providerUserType);
+			const providerBalance = await this.walletService.getBalance(providerWallet.id);
+			const available = providerBalance.available > 0n ? providerBalance.available : 0n;
+			chargedFromWallet = available < fineAmountInPaisa ? available : fineAmountInPaisa;
+
+			if (chargedFromWallet > 0n) {
+				await this.walletService.deductBalance(
+					providerWallet.id,
+					chargedFromWallet,
+					TransactionType.DEDUCTION,
+					{
+						disputeId,
+						type: 'dispute_fine',
+						bookingId: dispute.booking_car_id || dispute.booking_hotel_id,
+					},
+				);
+			}
+
+			const outstandingFine = fineAmountInPaisa - chargedFromWallet;
+			if (outstandingFine > 0n && dispute.booking_car_id) {
+				const dueDate = new Date();
+				dueDate.setDate(dueDate.getDate() + 15);
+
+				const existingDebt = await this.prisma.commissionDebt.findUnique({
+					where: { booking_id: dispute.booking_car_id },
+				});
+
+				if (!existingDebt) {
+					await this.prisma.commissionDebt.create({
+						data: {
+							driver_id: providerUserId,
+							booking_id: dispute.booking_car_id,
+							amount: outstandingFine,
+							status: 'pending',
+							due_date: dueDate,
+						},
+					});
+				} else if (existingDebt.status === 'pending') {
+					await this.prisma.commissionDebt.update({
+						where: { id: existingDebt.id },
+						data: {
+							amount: BigInt(existingDebt.amount.toString()) + outstandingFine,
+							due_date: dueDate,
+						},
+					});
+				} else {
+					await this.prisma.commissionDebt.update({
+						where: { id: existingDebt.id },
+						data: {
+							amount: outstandingFine,
+							status: 'pending',
+							paid_at: null,
+							due_date: dueDate,
+						},
+					});
+				}
+
+				createdDebt = outstandingFine;
+			}
+		}
+
 		if (customerUserId) {
+			const resolutionMsg = refundedToCustomer > 0n
+				? `Your complaint has been approved and resolved: ${dto.resolution}. PKR ${(Number(refundedToCustomer) / 100).toFixed(2)} has been credited to your wallet.`
+				: `Your complaint has been reviewed and resolved: ${dto.resolution}`;
 			await this.notificationsService.createNotification(
 				customerUserId,
 				'dispute_resolved',
 				'Your Complaint Has Been Resolved',
-				`Your complaint has been reviewed and resolved: ${dto.resolution}`,
+				resolutionMsg,
 				{
 					dispute_id: disputeId,
 					booking_type: dispute.booking_hotel_id ? 'hotel' : 'car',
 					booking_id: dispute.booking_hotel_id || dispute.booking_car_id,
+					refund_amount: Number(refundedToCustomer) / 100,
 				},
 			);
 		}
@@ -1821,7 +2041,7 @@ export class AdminService {
 		// ── Notify provider about action taken ────────────────────────────────
 		if (providerUserId) {
 			const actionMsg = fineAmount > 0
-				? `You have been fined PKR ${fineAmount} because of: ${dto.resolution}`
+				? `You have been fined PKR ${fineAmount}. Charged now: PKR ${(Number(chargedFromWallet) / 100).toFixed(2)}${createdDebt > 0n ? `, Debt added: PKR ${(Number(createdDebt) / 100).toFixed(2)}` : ''}. Reason: ${dto.resolution}`
 				: `Action has been taken on a complaint filed against you: ${dto.resolution}`;
 
 			await this.notificationsService.createNotification(
@@ -1834,6 +2054,8 @@ export class AdminService {
 					booking_type: dispute.booking_hotel_id ? 'hotel' : 'car',
 					booking_id: dispute.booking_hotel_id || dispute.booking_car_id,
 					fine_amount: fineAmount,
+					charged_amount: Number(chargedFromWallet) / 100,
+					debt_amount: Number(createdDebt) / 100,
 				},
 			);
 		}

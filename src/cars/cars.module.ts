@@ -12,12 +12,14 @@ import { GooglePlacesService } from '../common/services/google-places.service';
 import { FeatureFlagService } from '../common/services/feature-flag.service';
 import { WeatherService } from '../weather/weather.service';
 import { JwtModule } from '@nestjs/jwt';
+import { PaymentsModule } from '../payments/payments.module';
 
 @Module({
 	imports: [
 		AuthModule,
 		CloudinaryModule,
 		NotificationsModule,
+		PaymentsModule,
 		AdminModule,
 		ConfigModule,
 		JwtModule.register({

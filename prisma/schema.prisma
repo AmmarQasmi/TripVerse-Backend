@@ -61,6 +61,9 @@ model User {
   generatedItineraries          GeneratedItinerary[]
   hotelReviews                  HotelReview[]
   driverReviews                 DriverReview[]
+  wallets                       Wallet[]
+  commissionDebts               CommissionDebt[]       @relation("DriverCommissionDebts")
+  renewalFees                   RenewalFee[]           @relation("DriverRenewalFees")
 
   @@index([city_id])
   @@index([status])
@@ -666,6 +669,103 @@ model GeneratedItinerary {
   @@map("generated_itineraries")
 }
 
+model Wallet {
+  id               String               @id @default(cuid())
+  user_id          Int
+  userType         String
+  balance          BigInt               @default(0)
+  reserved         BigInt               @default(0)
+  locked           BigInt               @default(0)
+  created_at       DateTime             @default(now())
+  updated_at       DateTime             @updatedAt
+  user             User                 @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  transactions     WalletTransaction[]
+  topups           WalletTopup[]
+  disputeRefunds   DisputeRefund[]
+
+  @@unique([user_id, userType])
+  @@index([user_id])
+}
+
+model WalletTransaction {
+  id          String   @id @default(cuid())
+  wallet_id   String
+  type        String
+  amount      BigInt
+  metadata    Json?
+  booking_id  Int?
+  description String?
+  created_at  DateTime @default(now())
+  wallet      Wallet   @relation(fields: [wallet_id], references: [id], onDelete: Cascade)
+
+  @@index([wallet_id])
+  @@index([type])
+  @@index([created_at])
+}
+
+model CommissionDebt {
+  id        String   @id @default(cuid())
+  driver_id Int
+  booking_id Int      @unique
+  amount    BigInt
+  status    String   @default("pending")
+  created_at DateTime @default(now())
+  due_date  DateTime
+  paid_at   DateTime?
+  updated_at DateTime @updatedAt
+  driver    User     @relation("DriverCommissionDebts", fields: [driver_id], references: [id], onDelete: Cascade)
+
+  @@index([driver_id])
+  @@index([status])
+  @@index([due_date])
+}
+
+model WalletTopup {
+  id                     String   @id @default(cuid())
+  wallet_id              String
+  amount                 BigInt
+  status                 String   @default("pending")
+  stripe_payment_intent_id String?
+  created_at             DateTime @default(now())
+  completed_at           DateTime?
+  updated_at             DateTime @updatedAt
+  wallet                 Wallet   @relation(fields: [wallet_id], references: [id], onDelete: Cascade)
+
+  @@index([wallet_id])
+  @@index([status])
+}
+
+model DisputeRefund {
+  id           String   @id @default(cuid())
+  dispute_id   Int
+  wallet_id    String
+  amount       BigInt
+  refund_type  String
+  status       String   @default("pending")
+  processed_at DateTime?
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+  wallet       Wallet   @relation(fields: [wallet_id], references: [id], onDelete: Cascade)
+
+  @@index([wallet_id])
+}
+
+model RenewalFee {
+  id            String   @id @default(cuid())
+  driver_id     Int
+  amount        BigInt
+  renewal_type  String
+  status        String   @default("pending")
+  due_date      DateTime
+  paid_at       DateTime?
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+  driver        User     @relation("DriverRenewalFees", fields: [driver_id], references: [id], onDelete: Cascade)
+
+  @@index([driver_id])
+  @@index([status])
+}
+
 enum Role {
   client
   driver
@@ -717,6 +817,7 @@ enum PaymentStatus {
 
 enum PaymentMethod {
   online
+  wallet
   cash
 }
 
