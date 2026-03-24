@@ -179,24 +179,30 @@ export class AdminController {
 	@Post('disputes')
 	@UseGuards(JwtAuthGuard)
 	@UseInterceptors(
-		FileFieldsInterceptor([{ name: 'evidence', maxCount: 5 }], {
+		FileFieldsInterceptor(
+			[
+				{ name: 'evidence', maxCount: 5 },
+				{ name: 'evidence[]', maxCount: 5 },
+			],
+			{
 			storage: memoryStorage(),
 			limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB per file
 			fileFilter: (_req, file, cb) => {
 				const allowed = /image\/(jpeg|png|webp|gif)|video\/(mp4|quicktime)/;
 				cb(null, allowed.test(file.mimetype));
 			},
-		}),
+			},
+		),
 	)
 	async createDispute(
 		@Body() dto: CreateDisputeDto,
-		@UploadedFiles() files: { evidence?: Express.Multer.File[] },
+		@UploadedFiles() files: { evidence?: Express.Multer.File[]; 'evidence[]'?: Express.Multer.File[] },
 		@CurrentUser() user: any,
 	) {
 		// Enforce: only clients may raise disputes
 		dto.raised_by = 'client';
 		dto.reporter_user_id = user.id;
-		const evidenceFiles = files?.evidence ?? [];
+		const evidenceFiles = [...(files?.evidence ?? []), ...(files?.['evidence[]'] ?? [])];
 		return this.adminService.createDispute(dto, evidenceFiles);
 	}
 
@@ -209,6 +215,16 @@ export class AdminController {
 	@Roles(Role.admin)
 	async getAllDisputes(@Query() filters: DisputeFiltersDto) {
 		return this.adminService.getAllDisputes(filters);
+	}
+
+	/**
+	 * Get disputes filed by current customer
+	 * GET /admin/disputes/my?page=1&limit=20&status=pending&booking_type=car
+	 */
+	@Get('disputes/my')
+	@UseGuards(JwtAuthGuard)
+	async getMyDisputes(@CurrentUser() user: any, @Query() filters: DisputeFiltersDto) {
+		return this.adminService.getMyDisputes(user.id, filters);
 	}
 
 	/**

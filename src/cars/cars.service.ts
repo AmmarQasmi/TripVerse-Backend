@@ -8,6 +8,8 @@ import { WeatherService } from '../weather/weather.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { ChatGateway } from './chat.gateway';
 import { BookingType, Prisma } from '@prisma/client';
+import { CommissionService } from '../payments/commission.service';
+import { WalletService, TransactionType } from '../payments/wallet.service';
 import axios from 'axios';
 
 // =====================
@@ -72,6 +74,8 @@ export class CarsService {
 		private googlePlacesService: GooglePlacesService,
 		private weatherService: WeatherService,
 		private configService: ConfigService,
+		private walletService: WalletService,
+		private commissionService: CommissionService,
 		@Optional() @Inject(forwardRef(() => ChatGateway))
 		private chatGateway?: ChatGateway,
 	) {}
@@ -732,7 +736,7 @@ export class CarsService {
 		end_date?: string;
 		scheduled_pickup?: string;
 		customer_notes?: string;
-		payment_method?: 'online' | 'cash' | 'wallet';
+		payment_method?: 'wallet' | 'online' | 'cash';
 	}) {
 		const {
 			car_id,
@@ -802,7 +806,7 @@ export class CarsService {
 			platform_fee: priceCalculation.pricing_breakdown.platform_fee,
 			currency: 'pkr',
 			customer_notes,
-			payment_method: payment_method ?? 'online',
+			payment_method: payment_method ?? 'wallet',
 			requested_at: new Date(),
 		};
 
@@ -825,6 +829,20 @@ export class CarsService {
 		}
 		if (priceCalculation.detected_cities?.dropoff_city_id) {
 			bookingData.dropoff_city_id = priceCalculation.detected_cities.dropoff_city_id;
+		}
+
+		if (bookingData.payment_method === 'wallet') {
+			const customerWallet = await this.walletService.ensureWallet(user_id, 'client');
+			const balance = await this.walletService.getBalance(customerWallet.id);
+			const requiredPaisa = BigInt(
+				Math.round(Number(priceCalculation.pricing_breakdown.total_amount) * 100),
+			);
+
+			if (balance.available < requiredPaisa) {
+				throw new BadRequestException(
+					`Insufficient wallet balance. Required PKR ${(Number(requiredPaisa) / 100).toFixed(2)}, available PKR ${(Number(balance.available) / 100).toFixed(2)}.`,
+				);
+			}
 		}
 
 		// Create booking
@@ -857,6 +875,40 @@ export class CarsService {
 			},
 		});
 
+		if (booking.payment_method === 'wallet') {
+			const customerWallet = await this.walletService.ensureWallet(user_id, 'client');
+			const holdPaisa = BigInt(
+				Math.round(Number(booking.total_amount.toString()) * 100),
+			);
+
+			await this.walletService.deductBalance(
+				customerWallet.id,
+				holdPaisa,
+				TransactionType.DEDUCTION,
+				{ bookingId: booking.id, hold: true, reason: 'car_booking_hold' },
+			);
+
+			await this.prisma.paymentTransaction.create({
+				data: {
+					booking_car_id: booking.id,
+					user_id,
+					amount: booking.total_amount,
+					currency: booking.currency,
+					application_fee_amount: booking.platform_fee,
+					payment_method: 'wallet',
+					status: 'requires_payment',
+				},
+			});
+
+			await this.notificationsService.createNotification(
+				user_id,
+				'payment_received',
+				'Wallet Amount Held',
+				`PKR ${(Number(holdPaisa) / 100).toFixed(2)} has been held for booking #${booking.id}. It will be paid to the driver after trip completion and settlement.`,
+				{ booking_id: booking.id, amount_held: Number(holdPaisa) / 100 },
+			);
+		}
+
 		// Send notification to driver
 		await this.notificationsService.notifyBookingRequest(
 			booking.car.driver.user.id,
@@ -868,9 +920,11 @@ export class CarsService {
 			id: booking.id,
 			status: booking.status,
 			booking_type: booking.booking_type,
-			message: booking_type === 'RIDE_HAILING'
-				? 'Ride request sent to driver. You will be notified when they respond.'
-				: 'Booking request sent to driver. You will be notified when they respond.',
+			message: booking.payment_method === 'wallet'
+				? 'Booking request sent. Your wallet amount is held and will be released after completion and your approval.'
+				: booking_type === 'RIDE_HAILING'
+					? 'Ride request sent to driver. You will be notified when they respond.'
+					: 'Booking request sent to driver. You will be notified when they respond.',
 			booking_details: {
 				car: {
 					make: booking.car.carModel.make,
@@ -949,6 +1003,22 @@ export class CarsService {
 		const priceCalculation = await this.calculatePrice(car_id, pickup_location, dropoff_location, start_date, end_date);
 
 		// Create booking request
+		const resolvedPaymentMethod: 'wallet' | 'online' | 'cash' =
+			payment_method ?? 'wallet';
+
+		if (resolvedPaymentMethod === 'wallet') {
+			const customerWallet = await this.walletService.ensureWallet(user_id, 'client');
+			const balance = await this.walletService.getBalance(customerWallet.id);
+			const requiredPaisa = BigInt(
+				Math.round(Number(priceCalculation.pricing_breakdown.total_amount) * 100),
+			);
+			if (balance.available < requiredPaisa) {
+				throw new BadRequestException(
+					`Insufficient wallet balance. Required PKR ${(Number(requiredPaisa) / 100).toFixed(2)}, available PKR ${(Number(balance.available) / 100).toFixed(2)}.`,
+				);
+			}
+		}
+
 		const booking = await this.prisma.carBooking.create({
 			data: {
 				user_id,
@@ -965,7 +1035,7 @@ export class CarsService {
 				platform_fee: priceCalculation.pricing_breakdown.platform_fee,
 				currency: 'pkr',
 				customer_notes,
-				payment_method: payment_method ?? 'online',
+				payment_method: resolvedPaymentMethod,
 				requested_at: new Date(),
 			},
 			include: {
@@ -994,6 +1064,40 @@ export class CarsService {
 				},
 			},
 		});
+
+		if (booking.payment_method === 'wallet') {
+			const customerWallet = await this.walletService.ensureWallet(user_id, 'client');
+			const holdPaisa = BigInt(
+				Math.round(Number(booking.total_amount.toString()) * 100),
+			);
+
+			await this.walletService.deductBalance(
+				customerWallet.id,
+				holdPaisa,
+				TransactionType.DEDUCTION,
+				{ bookingId: booking.id, hold: true, reason: 'car_booking_hold' },
+			);
+
+			await this.prisma.paymentTransaction.create({
+				data: {
+					booking_car_id: booking.id,
+					user_id,
+					amount: booking.total_amount,
+					currency: booking.currency,
+					application_fee_amount: booking.platform_fee,
+					payment_method: 'wallet',
+					status: 'requires_payment',
+				},
+			});
+
+			await this.notificationsService.createNotification(
+				user_id,
+				'payment_received',
+				'Wallet Amount Held',
+				`PKR ${(Number(holdPaisa) / 100).toFixed(2)} has been held for booking #${booking.id}. It will be paid to the driver after trip completion and settlement.`,
+				{ booking_id: booking.id, amount_held: Number(holdPaisa) / 100 },
+			);
+		}
 
 		// Send notification to driver
 		await this.notificationsService.notifyBookingRequest(
@@ -1064,6 +1168,36 @@ export class CarsService {
 			where: { id: bookingId },
 			data: { status: 'CANCELLED' },
 		});
+
+		if (booking.payment_method === 'wallet') {
+			const heldPayment = await this.prisma.paymentTransaction.findFirst({
+				where: {
+					booking_car_id: bookingId,
+					payment_method: 'wallet',
+					status: 'requires_payment',
+				},
+				orderBy: { created_at: 'desc' },
+			});
+
+			if (heldPayment) {
+				const customerWallet = await this.walletService.ensureWallet(booking.user_id, 'client');
+				const refundPaisa = BigInt(
+					Math.round(Number(heldPayment.amount.toString()) * 100),
+				);
+
+				await this.walletService.addBalance(
+					customerWallet.id,
+					refundPaisa,
+					TransactionType.REFUND,
+					{ bookingId, source: 'wallet_booking_cancellation_refund' },
+				);
+
+				await this.prisma.paymentTransaction.update({
+					where: { id: heldPayment.id },
+					data: { status: 'refunded' },
+				});
+			}
+		}
 
 		// Notify driver about cancellation
 		try {
@@ -1151,7 +1285,50 @@ export class CarsService {
 				bookingId,
 				driverName,
 			);
+
+			if (booking.payment_method === 'wallet') {
+				const driverPayout = Number(booking.driver_earnings.toString());
+				const platformFee = Number(booking.platform_fee.toString());
+				const taxAmount = Number(booking.total_amount.toString()) - driverPayout - platformFee;
+				await this.notificationsService.createNotification(
+					driverId,
+					'payment_received',
+					'Wallet Booking Accepted',
+					`Wallet hold verified for booking #${bookingId}. Expected payout on completion: PKR ${driverPayout.toFixed(2)} (platform fee: PKR ${platformFee.toFixed(2)}, tax reserve: PKR ${taxAmount.toFixed(2)}).`,
+					{ booking_id: bookingId, expected_payout: driverPayout, platform_fee: platformFee, tax_amount: taxAmount },
+				);
+			}
 		} else {
+			if (booking.payment_method === 'wallet') {
+				const heldPayment = await this.prisma.paymentTransaction.findFirst({
+					where: {
+						booking_car_id: bookingId,
+						payment_method: 'wallet',
+						status: 'requires_payment',
+					},
+					orderBy: { created_at: 'desc' },
+				});
+
+				if (heldPayment) {
+					const customerWallet = await this.walletService.ensureWallet(booking.user_id, 'client');
+					const refundPaisa = BigInt(
+						Math.round(Number(heldPayment.amount.toString()) * 100),
+					);
+
+					await this.walletService.addBalance(
+						customerWallet.id,
+						refundPaisa,
+						TransactionType.REFUND,
+						{ bookingId, reason: 'driver_rejected_booking' },
+					);
+
+					await this.prisma.paymentTransaction.update({
+						where: { id: heldPayment.id },
+						data: { status: 'refunded' },
+					});
+				}
+			}
+
 			await this.notificationsService.notifyBookingRejected(
 				booking.user_id,
 				bookingId,
@@ -1228,6 +1405,9 @@ export class CarsService {
 		// For online bookings: create payment transaction immediately
 		// For cash bookings: payment is collected at trip end by the driver
 		if (booking.payment_method === 'online') {
+			// Legacy online payment (via Stripe) - for backward compatibility
+			await this.walletService.ensureWallet(booking.car.driver.user_id, 'driver');
+
 			const paymentTransaction = await this.prisma.paymentTransaction.create({
 				data: {
 					booking_car_id: bookingId,
@@ -1240,16 +1420,28 @@ export class CarsService {
 				},
 			});
 
-			// Create Stripe payment details
+			// Create Stripe payment details (if available)
 			await this.prisma.stripePaymentDetails.create({
 				data: {
 					payment_transaction_id: paymentTransaction.id,
-					stripe_payment_intent_id: payment.id,
-					stripe_charge_id: payment.charge_id,
+					stripe_payment_intent_id: `sim_${Date.now()}`,
+					stripe_charge_id: `ch_${Date.now()}`,
 				},
 			});
-		}
+		} else if (booking.payment_method === 'wallet') {
+			const heldPayment = await this.prisma.paymentTransaction.findFirst({
+				where: {
+					booking_car_id: bookingId,
+					payment_method: 'wallet',
+					status: 'requires_payment',
+				},
+				orderBy: { created_at: 'desc' },
+			});
 
+			if (!heldPayment) {
+				throw new BadRequestException('Wallet hold not found for this booking');
+			}
+		}
 		// Create chat for driver-customer communication
 		await this.prisma.chat.create({
 			data: {
@@ -1554,7 +1746,11 @@ export class CarsService {
 			include: {
 				car: {
 					include: {
-						driver: true,
+						driver: {
+							include: {
+								user: true,
+							},
+						},
 					},
 				},
 			},
@@ -1579,6 +1775,155 @@ export class CarsService {
 				completed_at: new Date(),
 			},
 		});
+
+		const totalAmountInPaisa = BigInt(
+			Math.round(parseFloat(booking.total_amount.toString()) * 100),
+		);
+
+		// Commission processing hook
+		if (booking.payment_method === 'online') {
+			const wallet = await this.walletService.ensureWallet(driverId, 'driver');
+			await this.walletService.addBalance(
+				wallet.id,
+				totalAmountInPaisa,
+				TransactionType.TOPUP,
+				{ bookingId, source: 'online_booking_credit' },
+			);
+
+			await this.commissionService.processOnlineCommission(
+				bookingId,
+				totalAmountInPaisa,
+			);
+		} else if (booking.payment_method === 'wallet') {
+			const heldPayment = await this.prisma.paymentTransaction.findFirst({
+				where: {
+					booking_car_id: bookingId,
+					payment_method: 'wallet',
+					status: 'requires_payment',
+				},
+				orderBy: { created_at: 'desc' },
+			});
+
+			if (heldPayment) {
+				const driverPaisa = BigInt(
+					Math.round(parseFloat(booking.driver_earnings.toString()) * 100),
+				);
+				const platformPaisa = BigInt(
+					Math.round(parseFloat(booking.platform_fee.toString()) * 100),
+				);
+				const taxPaisa = totalAmountInPaisa - driverPaisa - platformPaisa;
+
+				// Split commission: 6.5% platform, 8.5% tax from the total commission
+				const commissionTotalPaisa = platformPaisa;  // booking.platform_fee is the full commission
+				const actualPlatformPaisa = (commissionTotalPaisa * 65n) / 150n;  // 6.5%
+				const actualTaxPaisa = commissionTotalPaisa - actualPlatformPaisa;  // 8.5%
+				const driverWallet = await this.walletService.ensureWallet(driverId, 'driver');
+				let remainingDriverPaisa = driverPaisa;
+				let settledDebtPaisa = 0n;
+
+				if (driverPaisa > 0n) {
+					const pendingDebts = await this.prisma.commissionDebt.findMany({
+						where: {
+							driver_id: driverId,
+							status: 'pending',
+						},
+						orderBy: [{ due_date: 'asc' }, { created_at: 'asc' }],
+					});
+
+					for (const debt of pendingDebts) {
+						const debtPaisa = BigInt(debt.amount.toString());
+						if (remainingDriverPaisa < debtPaisa) {
+							break;
+						}
+
+						await this.prisma.commissionDebt.update({
+							where: { id: debt.id },
+							data: {
+								status: 'paid',
+								paid_at: new Date(),
+							},
+						});
+
+						await this.walletService.recordTransaction(
+							driverWallet.id,
+							TransactionType.DEBT_REPAYMENT,
+							debtPaisa,
+							{
+								bookingId,
+								debtId: debt.id,
+								source: 'wallet_payout_auto_settlement',
+								note: `Auto-settled commission debt #${debt.id} from booking #${bookingId} payout`,
+							},
+						);
+
+						remainingDriverPaisa -= debtPaisa;
+						settledDebtPaisa += debtPaisa;
+					}
+				}
+
+				if (remainingDriverPaisa > 0n) {
+					await this.walletService.addBalance(
+						driverWallet.id,
+						remainingDriverPaisa,
+						TransactionType.COMMISSION,
+						{ bookingId, source: 'wallet_release' },
+					);
+				}
+
+				const adminUser = await this.prisma.user.findFirst({
+					where: { role: 'admin', status: 'active' },
+					select: { id: true },
+				});
+
+				if (adminUser && actualPlatformPaisa > 0n) {
+					const adminWallet = await this.walletService.ensureWallet(adminUser.id, 'admin');
+					await this.walletService.addBalance(
+						adminWallet.id,
+						actualPlatformPaisa,
+						TransactionType.COMMISSION,
+						{ bookingId, source: 'wallet_platform_fee' },
+					);
+					if (actualTaxPaisa > 0n) {
+						await this.walletService.addBalance(
+							adminWallet.id,
+							actualTaxPaisa,
+							TransactionType.TAX_RESERVE,
+							{ bookingId, source: 'wallet_tax_reserve' },
+						);
+					}
+				}
+
+				await this.prisma.paymentTransaction.update({
+					where: { id: heldPayment.id },
+					data: { status: 'completed' },
+				});
+
+				await this.notificationsService.createNotification(
+					driverId,
+					'payment_received',
+					'Wallet Payout Released',
+					`Booking #${bookingId} payout processed. Credited: PKR ${(Number(remainingDriverPaisa) / 100).toFixed(2)}${settledDebtPaisa > 0n ? `, Debt settled: PKR ${(Number(settledDebtPaisa) / 100).toFixed(2)}` : ''}.`,
+					{
+						booking_id: bookingId,
+						gross_payout_amount: Number(driverPaisa) / 100,
+						credited_amount: Number(remainingDriverPaisa) / 100,
+						debt_settled_amount: Number(settledDebtPaisa) / 100,
+					},
+				);
+
+				await this.notificationsService.createNotification(
+					booking.user_id,
+					'payment_received',
+					'Driver Payment Completed',
+					`Driver has been paid PKR ${(Number(remainingDriverPaisa) / 100).toFixed(2)} for booking #${bookingId}. If you face any issue, please file a complaint from your bookings page.`,
+					{
+						booking_id: bookingId,
+						driver_paid_amount: Number(remainingDriverPaisa) / 100,
+						action: 'file_complaint_from_bookings',
+					},
+				);
+			}
+		}
 
 		// Send completion notification
 		const bookingWithUser = await this.prisma.carBooking.findUnique({
@@ -1669,8 +2014,6 @@ export class CarsService {
 			);
 		}
 
-		const platformFee = parseFloat(booking.platform_fee.toString());
-
 		// Mark cash as collected
 		await this.prisma.carBooking.update({
 			where: { id: bookingId },
@@ -1690,32 +2033,25 @@ export class CarsService {
 			},
 		});
 
-		// Deduct platform commission (5%) from driver's wallet_balance (can go negative = debt)
-		await this.prisma.user.update({
-			where: { id: driverId },
-			data: {
-				wallet_balance: {
-					decrement: platformFee,
-				},
-			},
-		});
-
-		// Get updated wallet balance
-		const updatedDriver = await this.prisma.user.findUnique({
-			where: { id: driverId },
-			select: { wallet_balance: true },
-		});
+		const totalAmountInPaisa = BigInt(
+			Math.round(parseFloat(booking.total_amount.toString()) * 100),
+		);
+		const debt = await this.commissionService.processCashBooking(
+			bookingId,
+			driverId,
+			totalAmountInPaisa,
+		);
 
 		const driverEarnings = parseFloat(booking.driver_earnings.toString());
-		const newWalletBalance = parseFloat(updatedDriver?.wallet_balance?.toString() ?? '0');
+		const commissionDebtPkr = parseFloat(debt.amount.toString()) / 100;
 
 		// Notify driver
 		await this.notificationsService.createNotification(
 			driverId,
 			'payment_received',
 			'Cash Collection Confirmed',
-			`You have successfully collected PKR ${Math.round(expectedAmount).toLocaleString()} in cash for booking #${bookingId}. Platform commission of PKR ${Math.round(platformFee).toLocaleString()} has been deducted from your wallet. Your net earnings for this trip: PKR ${Math.round(driverEarnings).toLocaleString()}.`,
-			{ booking_id: bookingId, amount: expectedAmount, platform_fee: platformFee, driver_earnings: driverEarnings, wallet_balance: newWalletBalance },
+			`You have successfully collected PKR ${Math.round(expectedAmount).toLocaleString()} in cash for booking #${bookingId}. Commission debt of PKR ${Math.round(commissionDebtPkr).toLocaleString()} has been recorded. Your net trip earnings: PKR ${Math.round(driverEarnings).toLocaleString()}.`,
+			{ booking_id: bookingId, amount: expectedAmount, commission_debt: commissionDebtPkr, driver_earnings: driverEarnings },
 		);
 
 		// Notify admins about cash collection
@@ -1729,8 +2065,8 @@ export class CarsService {
 				admin.id,
 				'payment_received',
 				'Cash Payment Collected - Car Booking',
-				`Driver has collected PKR ${Math.round(expectedAmount).toLocaleString()} cash for booking #${bookingId}. Platform fee (5%): PKR ${Math.round(platformFee).toLocaleString()} deducted from driver wallet.`,
-				{ booking_id: bookingId, booking_type: 'car', payment_method: 'cash', amount: expectedAmount, platform_fee: platformFee },
+				`Driver has collected PKR ${Math.round(expectedAmount).toLocaleString()} cash for booking #${bookingId}. Commission debt recorded: PKR ${Math.round(commissionDebtPkr).toLocaleString()}.`,
+				{ booking_id: bookingId, booking_type: 'car', payment_method: 'cash', amount: expectedAmount, commission_debt: commissionDebtPkr },
 			)
 		));
 
@@ -1738,9 +2074,9 @@ export class CarsService {
 			message: 'Cash payment confirmed successfully',
 			booking_id: bookingId,
 			total_collected: Math.round(expectedAmount),
-			platform_fee_deducted: Math.round(platformFee),
+			commission_debt_created: Math.round(commissionDebtPkr),
 			your_earnings: Math.round(driverEarnings),
-			wallet_balance: newWalletBalance,
+			debt_status: debt.status,
 		};
 	}
 

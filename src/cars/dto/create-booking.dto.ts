@@ -65,13 +65,13 @@ export class CreateBookingDto {
   customer_notes?: string;
 
   /**
-   * Payment method (default: 'online')
+   * Payment method (default: 'wallet')
    */
   @IsOptional()
-  @IsEnum(['online', 'cash', 'wallet'], {
-    message: 'payment_method must be online, cash, or wallet',
+  @IsEnum(['wallet', 'online', 'cash'], {
+    message: 'payment_method must be wallet, online, or cash',
   })
-  payment_method?: 'online' | 'cash' | 'wallet';
+  payment_method?: 'wallet' | 'online' | 'cash';
 }
 
 /**
