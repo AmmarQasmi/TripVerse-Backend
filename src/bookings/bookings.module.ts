@@ -6,9 +6,10 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { AuthModule } from '../auth/auth.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { PaymentsModule } from '../payments/payments.module';
 
 @Module({
-	imports: [AuthModule, NotificationsModule, PrismaModule],
+	imports: [AuthModule, NotificationsModule, PrismaModule, PaymentsModule],
 	controllers: [HotelBookingsController, CarBookingsController],
 	providers: [BookingsService, RolesGuard],
 	exports: [BookingsService],

@@ -40,8 +40,21 @@ export const CURRENCY_CODES = {
   PKR: 'pkr',
 } as const;
 
-// Commission Rate (5% platform, 95% driver)
-export const COMMISSION_RATE = 0.05;
+/**
+ * Global Commission Policy
+ * 15% Platform share (split into 85% net commission + 15% tax reserve)
+ * 85% Provider share (driver/hotel manager)
+ */
+export const COMMISSION_POLICY = {
+  PLATFORM_SHARE: 0.15, // 15% to platform
+  PROVIDER_SHARE: 0.85, // 85% to driver/hotel manager
+  // Inside platform's 15%:
+  NET_COMMISSION_SPLIT: 0.85, // 85% of platform's 15% = 12.75% net commission
+  TAX_RESERVE_SPLIT: 0.15, // 15% of platform's 15% = 2.25% tax reserve
+} as const;
+
+// Legacy constant references (deprecated, use COMMISSION_POLICY instead)
+export const COMMISSION_RATE = 0.15;
 
 // Pagination Defaults
 export const PAGINATION_DEFAULTS = {

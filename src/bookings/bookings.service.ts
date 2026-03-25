@@ -1,14 +1,17 @@
 import { Injectable, NotFoundException, BadRequestException, Inject } from '@nestjs/common';
 import { NotificationsService as CommonNotificationsService } from '../common/services/notifications.service';
-import { HotelBookingStatus, PaymentStatus } from '@prisma/client';
+import { HotelBookingStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { CreateBookingWithPaymentDto } from './dto/create-booking-with-payment.dto';
+import { WalletService, TransactionType } from '../payments/wallet.service';
+import { COMMISSION_POLICY } from '../common/utils/constants';
 
 @Injectable()
 export class BookingsService {
 	constructor(
 		@Inject(PrismaService) private prisma: PrismaService,
 		private notificationsService: CommonNotificationsService,
+		private walletService: WalletService,
 	) {}
 
 	/**
@@ -279,7 +282,16 @@ export class BookingsService {
 	 * Combines availability check + booking creation + simulated payment in one transaction
 	 */
 	async createBookingWithPayment(userId: number, dto: CreateBookingWithPaymentDto) {
-		const { hotel_id, room_type_id, quantity, check_in, check_out, guest_name, guest_email, guest_phone, special_requests, payment_method } = dto;
+		const { hotel_id, room_type_id, quantity, check_in, check_out, guest_name, guest_email, guest_phone, special_requests, payment_method, cash_policy_acknowledged } = dto;
+
+		const normalizedPaymentMethod = (payment_method || 'card').toLowerCase();
+		if (!['card', 'cash', 'wallet'].includes(normalizedPaymentMethod)) {
+			throw new BadRequestException('Invalid payment method. Use card, wallet, or cash');
+		}
+
+		if (normalizedPaymentMethod === 'cash' && cash_policy_acknowledged !== true) {
+			throw new BadRequestException('Cash bookings require policy acknowledgment before confirmation');
+		}
 
 		// Validate dates
 		const checkInDate = new Date(check_in + 'T00:00:00.000Z');
@@ -381,6 +393,13 @@ export class BookingsService {
 			const taxAmount = Math.round(subtotal * taxRate * 100) / 100;
 			const serviceFee = Math.round(subtotal * serviceFeeRate * 100) / 100;
 			const totalAmount = Math.round((subtotal + taxAmount + serviceFee) * 100) / 100;
+			const totalAmountInPaisa = BigInt(Math.round(totalAmount * 100));
+			let applicationFeeAmount = serviceFee;
+			let walletSettlementSummary:
+				| { customerDeducted: bigint; managerCredited: bigint; platformCredited: bigint }
+				| null = null;
+
+			// Wallet settlement happens after booking is created, so ledger metadata can include bookingId.
 
 			// 4. Create booking directly as CONFIRMED (payment is simulated)
 			const newBooking = await tx.hotelBooking.create({
@@ -398,6 +417,170 @@ export class BookingsService {
 				},
 			});
 
+			if (normalizedPaymentMethod === 'wallet') {
+				const customerWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: userId,
+							userType: 'client',
+						},
+					},
+					update: {},
+					create: {
+						user_id: userId,
+						userType: 'client',
+					},
+				});
+
+				const customerAvailable = customerWallet.balance - customerWallet.reserved - customerWallet.locked;
+				if (customerAvailable < totalAmountInPaisa) {
+					throw new BadRequestException(
+						`Insufficient wallet balance. Required PKR ${(Number(totalAmountInPaisa) / 100).toFixed(2)}, available PKR ${(Number(customerAvailable) / 100).toFixed(2)}.`,
+					);
+				}
+
+				if (!hotel.manager.user_id) {
+					throw new BadRequestException('Hotel manager user account is missing');
+				}
+
+				const managerWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: hotel.manager.user_id,
+							userType: 'hotel_manager',
+						},
+					},
+					update: {},
+					create: {
+						user_id: hotel.manager.user_id,
+						userType: 'hotel_manager',
+					},
+				});
+
+				const adminUser = await tx.user.findFirst({ where: { role: 'admin' }, select: { id: true } });
+				if (!adminUser) {
+					throw new BadRequestException('Admin account not found for wallet settlement');
+				}
+
+				const adminWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: adminUser.id,
+							userType: 'admin',
+						},
+					},
+					update: {},
+					create: {
+						user_id: adminUser.id,
+						userType: 'admin',
+					},
+				});
+
+				const managerShare = BigInt(
+					Math.round(Number(totalAmountInPaisa) * COMMISSION_POLICY.PROVIDER_SHARE),
+				);
+				const platformShare = totalAmountInPaisa - managerShare;
+				applicationFeeAmount = Number(platformShare) / 100;
+				const netCommissionShare = BigInt(
+					Math.round(Number(platformShare) * COMMISSION_POLICY.NET_COMMISSION_SPLIT),
+				);
+				const taxReserveShare = platformShare - netCommissionShare;
+
+				await tx.wallet.update({
+					where: { id: customerWallet.id },
+					data: {
+						balance: {
+							decrement: totalAmountInPaisa,
+						},
+					},
+				});
+				await tx.walletTransaction.create({
+					data: {
+						wallet_id: customerWallet.id,
+						type: TransactionType.DEDUCTION,
+						amount: -totalAmountInPaisa,
+						description: `Wallet payment for hotel booking #${newBooking.id}`,
+						metadata: {
+							bookingId: newBooking.id,
+							hotelId: hotel_id,
+							roomTypeId: room_type_id,
+							paymentMethod: 'wallet',
+						},
+					},
+				});
+
+				await tx.wallet.update({
+					where: { id: managerWallet.id },
+					data: {
+						balance: {
+							increment: managerShare,
+						},
+					},
+				});
+				await tx.walletTransaction.create({
+					data: {
+						wallet_id: managerWallet.id,
+						type: TransactionType.COMMISSION,
+						amount: managerShare,
+						description: `Hotel booking payout (85%) for booking #${newBooking.id}`,
+						metadata: {
+							bookingId: newBooking.id,
+							hotelId: hotel_id,
+							roomTypeId: room_type_id,
+							paymentMethod: 'wallet',
+						},
+					},
+				});
+
+				await tx.wallet.update({
+					where: { id: adminWallet.id },
+					data: {
+						balance: {
+							increment: platformShare,
+						},
+					},
+				});
+				if (netCommissionShare > 0n) {
+					await tx.walletTransaction.create({
+						data: {
+							wallet_id: adminWallet.id,
+							type: TransactionType.COMMISSION,
+							amount: netCommissionShare,
+							description: `Hotel booking net commission for booking #${newBooking.id}`,
+							metadata: {
+								bookingId: newBooking.id,
+								hotelId: hotel_id,
+								roomTypeId: room_type_id,
+								paymentMethod: 'wallet',
+							},
+						},
+					});
+				}
+				if (taxReserveShare > 0n) {
+					await tx.walletTransaction.create({
+						data: {
+							wallet_id: adminWallet.id,
+							type: TransactionType.TAX_RESERVE,
+							amount: taxReserveShare,
+							description: `Hotel booking tax reserve for booking #${newBooking.id}`,
+							metadata: {
+								bookingId: newBooking.id,
+								hotelId: hotel_id,
+								roomTypeId: room_type_id,
+								paymentMethod: 'wallet',
+							},
+						},
+					});
+				}
+
+				walletSettlementSummary = {
+					customerDeducted: totalAmountInPaisa,
+					managerCredited: managerShare,
+					platformCredited: platformShare,
+				};
+
+			}
+
 			// 5. Create payment transaction record
 			const paymentTransaction = await tx.paymentTransaction.create({
 				data: {
@@ -405,10 +588,53 @@ export class BookingsService {
 					user_id: userId,
 					amount: totalAmount,
 					currency: 'pkr',
-					application_fee_amount: serviceFee,
+					application_fee_amount: applicationFeeAmount,
+					payment_method:
+						normalizedPaymentMethod === 'cash'
+							? PaymentMethod.cash
+							: normalizedPaymentMethod === 'wallet'
+								? PaymentMethod.wallet
+								: PaymentMethod.online,
 					status: PaymentStatus.completed,
 				},
 			});
+
+			// 6. Handle CASH payment - create hotel debt
+			let hotelDebtCreated = false;
+			let autoRecoveredAmount = 0n;
+			if (normalizedPaymentMethod === 'cash') {
+				const amountInPaisa = BigInt(Math.round(totalAmount * 100));
+				const dueAt = new Date(checkInDate.getTime() + 30 * 24 * 60 * 60 * 1000); // Check-in + 30 days
+
+				// Ensure hotel manager wallet exists
+				const managerWallet = await this.walletService.ensureWallet(hotel.manager.user_id, 'hotel_manager');
+
+				// Create wallet transaction for hotel debt
+				await tx.walletTransaction.create({
+					data: {
+						wallet_id: managerWallet.id,
+						type: 'hotel_debt',
+						amount: -amountInPaisa, // Negative because it's a debt deduction
+						description: `Hotel debt for booking #${newBooking.id}`,
+						metadata: {
+							bookingId: newBooking.id,
+							hotelId: hotel_id,
+							hotelName: hotel.name,
+							roomType: roomType.name,
+							guestName: guest_name,
+							checkIn: checkInDate.toISOString(),
+							checkOut: checkOutDate.toISOString(),
+							dueAt: dueAt.toISOString(),
+							status: 'pending',
+							gracePeriodUntil: new Date(dueAt.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString(),
+							paymentMethod: 'cash',
+							createdAt: new Date().toISOString(),
+						},
+					},
+				});
+
+				hotelDebtCreated = true;
+			}
 
 			return {
 				booking: newBooking,
@@ -421,6 +647,9 @@ export class BookingsService {
 				taxAmount,
 				serviceFee,
 				totalAmount,
+				walletSettlementSummary,
+				hotelDebtCreated,
+				autoRecoveredAmount,
 			};
 		});
 
@@ -438,6 +667,42 @@ export class BookingsService {
 						hotel_id: result.hotel.id,
 					},
 				);
+
+				// Send debt notification for CASH payments
+				if (result.hotelDebtCreated) {
+					if (result.autoRecoveredAmount > 0n) {
+						// Immediate recovery successful
+						await this.notificationsService.createNotification(
+							result.hotel.manager.user.id,
+							'payment_received',
+							'Hotel Debt Collected',
+							`Hotel debt of PKR ${(Number(result.autoRecoveredAmount) / 100).toFixed(2)} for booking #${result.booking.id} has been automatically collected from your wallet under the check-in + 30 days policy.`,
+							{
+								booking_id: result.booking.id,
+								debtAmount: result.autoRecoveredAmount.toString(),
+								status: 'auto_recovered',
+								checkInTime: result.booking.check_in.toISOString(),
+							},
+						).catch(err => console.error('Failed to notify of auto-recovery:', err));
+					} else {
+						// Debt pending collection
+						const dueAt = new Date(result.booking.check_in.getTime() + 30 * 24 * 60 * 60 * 1000);
+						await this.notificationsService.createNotification(
+							result.hotel.manager.user.id,
+							'booking_request',
+							'Hotel Debt Created - Payment Pending',
+							`Hotel debt of PKR ${(Number(result.totalAmount * 100) / 100).toFixed(2)} for booking #${result.booking.id} will be collected on ${dueAt.toISOString()} (check-in + 30 days). Grace period: 3 days.`,
+							{
+								booking_id: result.booking.id,
+								debtAmount: (result.totalAmount * 100).toFixed(0),
+								status: 'pending',
+								dueAt: dueAt.toISOString(),
+								gracePeriodDays: 3,
+								checkInTime: result.booking.check_in.toISOString(),
+							},
+						).catch(err => console.error('Failed to notify of pending debt:', err));
+					}
+				}
 			}
 		} catch (error) {
 			console.error('Failed to notify hotel manager about booking:', error);
@@ -446,8 +711,92 @@ export class BookingsService {
 		// Notify user
 		try {
 			await this.notificationsService.notifyBookingConfirmed(userId, result.booking.id, 'hotel');
+
+			if (result.walletSettlementSummary) {
+				await this.notificationsService.createNotification(
+					userId,
+					'payment_received',
+					'Wallet Payment Deducted',
+					`PKR ${(Number(result.walletSettlementSummary.customerDeducted) / 100).toFixed(2)} was deducted from your wallet for booking #${result.booking.id}.`,
+					{
+						booking_id: result.booking.id,
+						amount: result.walletSettlementSummary.customerDeducted.toString(),
+						payment_method: 'wallet',
+					},
+				);
+
+				if (result.hotel?.manager?.user?.id) {
+					await this.notificationsService.createNotification(
+						result.hotel.manager.user.id,
+						'payment_received',
+						'Wallet Payout Received',
+						`PKR ${(Number(result.walletSettlementSummary.managerCredited) / 100).toFixed(2)} was credited to your wallet from booking #${result.booking.id}.`,
+						{
+							booking_id: result.booking.id,
+							amount: result.walletSettlementSummary.managerCredited.toString(),
+							payment_method: 'wallet',
+						},
+					);
+				}
+			}
 		} catch (error) {
 			console.error('Failed to notify user about booking confirmation:', error);
+		}
+
+		// Notify admins about hotel booking money movement (wallet/cash debt)
+		try {
+			const admins = await this.prisma.user.findMany({
+				where: { role: 'admin', status: 'active' },
+				select: { id: true },
+			});
+
+			for (const admin of admins) {
+				if (result.walletSettlementSummary) {
+					await this.notificationsService.createNotification(
+						admin.id,
+						'hotel_booking_payment_received',
+						'Hotel Wallet Transaction Recorded',
+						`Booking #${result.booking.id}: customer paid PKR ${(Number(result.walletSettlementSummary.customerDeducted) / 100).toFixed(2)} via wallet. Platform credited PKR ${(Number(result.walletSettlementSummary.platformCredited) / 100).toFixed(2)}.`,
+						{
+							booking_id: result.booking.id,
+							payment_method: 'wallet',
+							customer_amount: result.walletSettlementSummary.customerDeducted.toString(),
+							platform_amount: result.walletSettlementSummary.platformCredited.toString(),
+						},
+					);
+				}
+
+				if (result.hotelDebtCreated) {
+					const debtAmountInPaisa = BigInt(Math.round(result.totalAmount * 100));
+					await this.notificationsService.createNotification(
+						admin.id,
+						'hotel_booking_payment_received',
+						'Hotel Cash Debt Recorded',
+						`Booking #${result.booking.id} was confirmed with cash. Hotel debt PKR ${(Number(debtAmountInPaisa) / 100).toFixed(2)} was recorded for manager settlement policy.`,
+						{
+							booking_id: result.booking.id,
+							payment_method: 'cash',
+							debt_amount: debtAmountInPaisa.toString(),
+						},
+					);
+				}
+
+				if (!result.walletSettlementSummary && !result.hotelDebtCreated) {
+					await this.notificationsService.createNotification(
+						admin.id,
+						'hotel_booking_payment_received',
+						'Hotel Online Payment Recorded',
+						`Booking #${result.booking.id} payment of PKR ${result.totalAmount.toFixed(2)} was received via online/card method.`,
+						{
+							booking_id: result.booking.id,
+							payment_method: 'online',
+							amount: result.totalAmount,
+						},
+					);
+				}
+			}
+		} catch (error) {
+			console.error('Failed to notify admins about hotel booking transaction:', error);
 		}
 
 		return {
@@ -498,6 +847,15 @@ export class BookingsService {
 				},
 			},
 			created_at: result.booking.created_at.toISOString(),
+			hotelDebt: result.hotelDebtCreated ? {
+				created: true,
+					dueAt: new Date(result.booking.check_in.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+				amount: (result.totalAmount * 100).toFixed(0),
+				autoRecovered: result.autoRecoveredAmount > 0n,
+				recoveredAmount: result.autoRecoveredAmount > 0n ? (Number(result.autoRecoveredAmount) / 100).toFixed(2) : null,
+				gracePeriodDays: 3,
+				status: result.autoRecoveredAmount > 0n ? 'recovered' : 'pending',
+			} : null,
 		};
 	}
 
@@ -778,6 +1136,17 @@ export class BookingsService {
 	async cancelHotelBooking(bookingId: number, userId: number) {
 		const booking = await this.prisma.hotelBooking.findUnique({
 			where: { id: bookingId },
+			include: {
+				hotel: {
+					include: {
+						manager: true,
+					},
+				},
+				payments: {
+					orderBy: { created_at: 'desc' },
+					take: 1,
+				},
+			},
 		});
 
 		if (!booking) {
@@ -796,20 +1165,468 @@ export class BookingsService {
 			throw new BadRequestException('Cannot cancel completed booking');
 		}
 
-		// Update booking status to CANCELLED
-		const updatedBooking = await this.prisma.hotelBooking.update({
-			where: { id: bookingId },
-			data: {
-				status: HotelBookingStatus.CANCELLED,
-			},
+		const now = new Date();
+		const cancellationDeadline = new Date(booking.check_in.getTime() - 24 * 60 * 60 * 1000);
+		if (now >= cancellationDeadline) {
+			throw new BadRequestException('Cancellation is only allowed before 1 day prior to check-in');
+		}
+
+		const lastPayment = booking.payments[0];
+		const isCashBooking = lastPayment?.payment_method === PaymentMethod.cash;
+		const isWalletBooking = lastPayment?.payment_method === PaymentMethod.wallet;
+		const totalAmountInPaisa = BigInt(Math.round(Number(booking.total_amount) * 100));
+		const refundAmountInPaisa = (totalAmountInPaisa * 90n) / 100n;
+
+		const updatedBooking = await this.prisma.$transaction(async (tx) => {
+			let txWalletRefundSummary: { customerRefunded: bigint; managerDebited: bigint; adminDebited: bigint } | null = null;
+			let txCashCancellationSummary: { customerDebited: bigint; managerCredited: bigint; adminCredited: bigint } | null = null;
+			if (isCashBooking) {
+				const customerDebt = (totalAmountInPaisa * 25n) / 100n;
+				const managerCompensation = (totalAmountInPaisa * 10n) / 100n;
+				const adminShare = customerDebt - managerCompensation;
+
+				const customerWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: userId,
+							userType: 'client',
+						},
+					},
+					update: {},
+					create: {
+						user_id: userId,
+						userType: 'client',
+					},
+				});
+				const managerUserId = booking.hotel.manager?.user_id;
+				if (!managerUserId) {
+					throw new BadRequestException('Hotel manager not found for cancellation compensation');
+				}
+
+				const managerWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: managerUserId,
+							userType: 'hotel_manager',
+						},
+					},
+					update: {},
+					create: {
+						user_id: managerUserId,
+						userType: 'hotel_manager',
+					},
+				});
+				const adminUser = await tx.user.findFirst({ where: { role: 'admin' }, select: { id: true } });
+				if (!adminUser) {
+					throw new BadRequestException('Admin account not found for cancellation settlement');
+				}
+
+				const adminWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: adminUser.id,
+							userType: 'admin',
+						},
+					},
+					update: {},
+					create: {
+						user_id: adminUser.id,
+						userType: 'admin',
+					},
+				});
+
+				// Record customer debt and allow wallet to go negative as intended debt behavior.
+				await tx.walletTransaction.create({
+					data: {
+						wallet_id: customerWallet.id,
+						type: TransactionType.DEDUCTION,
+						amount: -customerDebt,
+						description: `Cash hotel cancellation debt for booking #${booking.id}`,
+						metadata: {
+							bookingId: booking.id,
+							type: 'hotel_cash_cancellation_debt',
+							status: 'pending',
+							managerCompensation: managerCompensation.toString(),
+							adminShare: adminShare.toString(),
+						},
+					},
+				});
+
+				await tx.wallet.update({
+					where: { id: customerWallet.id },
+					data: {
+						balance: {
+							decrement: customerDebt,
+						},
+					},
+				});
+
+				await tx.walletTransaction.create({
+					data: {
+						wallet_id: managerWallet.id,
+						type: TransactionType.REFUND,
+						amount: managerCompensation,
+						description: `Cash cancellation compensation for booking #${booking.id}`,
+						metadata: {
+							bookingId: booking.id,
+							type: 'cash_cancellation_compensation',
+						},
+					},
+				});
+				await tx.wallet.update({
+					where: { id: managerWallet.id },
+					data: {
+						balance: {
+							increment: managerCompensation,
+						},
+					},
+				});
+
+				await tx.walletTransaction.create({
+					data: {
+						wallet_id: adminWallet.id,
+						type: TransactionType.COMMISSION,
+						amount: adminShare,
+						description: `Cash cancellation admin share for booking #${booking.id}`,
+						metadata: {
+							bookingId: booking.id,
+							type: 'cash_cancellation_admin_share',
+						},
+					},
+				});
+				await tx.wallet.update({
+					where: { id: adminWallet.id },
+					data: {
+						balance: {
+							increment: adminShare,
+						},
+					},
+				});
+
+				// Cancel related pending hotel debt for this booking.
+				const relatedHotelDebts = await tx.walletTransaction.findMany({
+					where: {
+						wallet_id: managerWallet.id,
+						type: TransactionType.HOTEL_DEBT,
+					},
+				});
+
+				for (const debtTx of relatedHotelDebts) {
+					const metadata = (debtTx.metadata || {}) as Record<string, any>;
+					if (metadata.bookingId === booking.id && metadata.status !== 'recovered' && metadata.status !== 'cancelled') {
+						await tx.walletTransaction.update({
+							where: { id: debtTx.id },
+							data: {
+								metadata: {
+									...metadata,
+									status: 'cancelled',
+									cancelledAt: new Date().toISOString(),
+									cancelledReason: 'booking_cancelled_by_customer',
+								},
+							},
+						});
+					}
+				}
+
+				txCashCancellationSummary = {
+					customerDebited: customerDebt,
+					managerCredited: managerCompensation,
+					adminCredited: adminShare,
+				};
+			}
+
+			if (isWalletBooking) {
+				const customerWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: userId,
+							userType: 'client',
+						},
+					},
+					update: {},
+					create: {
+						user_id: userId,
+						userType: 'client',
+					},
+				});
+
+				const managerUserId = booking.hotel.manager?.user_id;
+				if (!managerUserId) {
+					throw new BadRequestException('Hotel manager not found for wallet refund');
+				}
+
+				const managerWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: managerUserId,
+							userType: 'hotel_manager',
+						},
+					},
+					update: {},
+					create: {
+						user_id: managerUserId,
+						userType: 'hotel_manager',
+					},
+				});
+
+				const adminUser = await tx.user.findFirst({ where: { role: 'admin' }, select: { id: true } });
+				if (!adminUser) {
+					throw new BadRequestException('Admin account not found for wallet refund settlement');
+				}
+
+				const adminWallet = await tx.wallet.upsert({
+					where: {
+						user_id_userType: {
+							user_id: adminUser.id,
+							userType: 'admin',
+						},
+					},
+					update: {},
+					create: {
+						user_id: adminUser.id,
+						userType: 'admin',
+					},
+				});
+
+				const managerShare = BigInt(
+					Math.round(Number(totalAmountInPaisa) * COMMISSION_POLICY.PROVIDER_SHARE),
+				);
+				const managerReversal = managerShare >= refundAmountInPaisa ? refundAmountInPaisa : managerShare;
+				const adminReversal = refundAmountInPaisa - managerReversal;
+
+				await tx.wallet.update({
+					where: { id: customerWallet.id },
+					data: {
+						balance: {
+							increment: refundAmountInPaisa,
+						},
+					},
+				});
+				await tx.walletTransaction.create({
+					data: {
+						wallet_id: customerWallet.id,
+						type: TransactionType.REFUND,
+						amount: refundAmountInPaisa,
+						description: `Wallet refund (90%) for cancelled hotel booking #${booking.id}`,
+						metadata: {
+							bookingId: booking.id,
+							type: 'hotel_booking_wallet_refund',
+							refundRate: '90%',
+						},
+					},
+				});
+
+				await tx.wallet.update({
+					where: { id: managerWallet.id },
+					data: {
+						balance: {
+							decrement: managerReversal,
+						},
+					},
+				});
+				await tx.walletTransaction.create({
+					data: {
+						wallet_id: managerWallet.id,
+						type: TransactionType.DEDUCTION,
+						amount: -managerReversal,
+						description: `Wallet payout reversal for cancelled booking #${booking.id}`,
+						metadata: {
+							bookingId: booking.id,
+							type: 'hotel_booking_wallet_reversal',
+							refundRate: '90%',
+						},
+					},
+				});
+
+				if (adminReversal > 0n) {
+					await tx.wallet.update({
+						where: { id: adminWallet.id },
+						data: {
+							balance: {
+								decrement: adminReversal,
+							},
+						},
+					});
+					await tx.walletTransaction.create({
+						data: {
+							wallet_id: adminWallet.id,
+							type: TransactionType.DEDUCTION,
+							amount: -adminReversal,
+							description: `Platform share reversal for cancelled booking #${booking.id}`,
+							metadata: {
+								bookingId: booking.id,
+								type: 'hotel_booking_platform_reversal',
+								refundRate: '90%',
+							},
+						},
+					});
+				}
+
+				txWalletRefundSummary = {
+					customerRefunded: refundAmountInPaisa,
+					managerDebited: managerReversal,
+					adminDebited: adminReversal,
+				};
+			}
+
+			await tx.bookingCancellation.create({
+				data: {
+					booking_hotel_id: booking.id,
+					cancelled_by: 'client',
+					reason: isCashBooking ? 'Cash booking cancellation with debt policy' : 'Customer cancellation',
+					refund_amount: isCashBooking ? 0 : Number(refundAmountInPaisa) / 100,
+				},
+			});
+
+			if (lastPayment && !isCashBooking) {
+				await tx.paymentTransaction.update({
+					where: { id: lastPayment.id },
+					data: {
+						status: PaymentStatus.refunded,
+					},
+				});
+			}
+
+			const cancelledBooking = await tx.hotelBooking.update({
+				where: { id: bookingId },
+				data: {
+					status: HotelBookingStatus.CANCELLED,
+				},
+			});
+
+			return {
+				booking: cancelledBooking,
+				walletRefundSummary: txWalletRefundSummary,
+				cashCancellationSummary: txCashCancellationSummary,
+			};
 		});
 
-		// TODO: Process refund if payment was made
-		// TODO: Send cancellation notifications
+		if (updatedBooking.cashCancellationSummary) {
+			this.notificationsService.createNotification(
+				userId,
+				'payment_received',
+				'Cash Cancellation Charge Applied',
+				`PKR ${(Number(updatedBooking.cashCancellationSummary.customerDebited) / 100).toFixed(2)} was deducted from your wallet as the cancellation charge for cash booking #${booking.id}.`,
+				{
+					booking_id: booking.id,
+					amount: updatedBooking.cashCancellationSummary.customerDebited.toString(),
+					payment_method: 'cash',
+				},
+			).catch((error) => console.error('Failed to notify customer cash cancellation charge:', error));
+
+			const managerUserId = booking.hotel.manager?.user_id;
+			if (managerUserId) {
+				this.notificationsService.createNotification(
+					managerUserId,
+					'payment_received',
+					'Cash Cancellation Compensation Received',
+					`PKR ${(Number(updatedBooking.cashCancellationSummary.managerCredited) / 100).toFixed(2)} was credited as cancellation compensation for booking #${booking.id}.`,
+					{
+						booking_id: booking.id,
+						amount: updatedBooking.cashCancellationSummary.managerCredited.toString(),
+						payment_method: 'cash',
+					},
+				).catch((error) => console.error('Failed to notify manager cash cancellation compensation:', error));
+			}
+
+			this.prisma.user.findMany({
+				where: { role: 'admin', status: 'active' },
+				select: { id: true },
+			}).then((admins) => Promise.all(
+				admins.map((admin) => this.notificationsService.createNotification(
+					admin.id,
+					'payment_received',
+					'Cash Cancellation Admin Share Received',
+					`PKR ${(Number(updatedBooking.cashCancellationSummary!.adminCredited) / 100).toFixed(2)} was credited as admin share for cancelled cash booking #${booking.id}.`,
+					{
+						booking_id: booking.id,
+						amount: updatedBooking.cashCancellationSummary!.adminCredited.toString(),
+						payment_method: 'cash',
+					},
+				)),
+			)).catch((error) => console.error('Failed to notify admins cash cancellation share:', error));
+		}
+
+		if (updatedBooking.walletRefundSummary) {
+			this.notificationsService.createNotification(
+				userId,
+				'payment_received',
+				'Wallet Refund Processed',
+				`PKR ${(Number(updatedBooking.walletRefundSummary.customerRefunded) / 100).toFixed(2)} (90%) was refunded to your wallet for cancelled booking #${booking.id}.`,
+				{
+					booking_id: booking.id,
+					amount: updatedBooking.walletRefundSummary.customerRefunded.toString(),
+					refund_rate: '90%',
+				},
+			).catch((error) => console.error('Failed to notify customer wallet refund:', error));
+
+			const managerUserId = booking.hotel.manager?.user_id;
+			if (managerUserId) {
+				this.notificationsService.createNotification(
+					managerUserId,
+					'payment_received',
+					'Wallet Payout Reversed',
+					`PKR ${(Number(updatedBooking.walletRefundSummary.managerDebited) / 100).toFixed(2)} was deducted from your wallet due to cancellation of booking #${booking.id}.`,
+					{
+						booking_id: booking.id,
+						amount: updatedBooking.walletRefundSummary.managerDebited.toString(),
+					},
+				).catch((error) => console.error('Failed to notify manager wallet reversal:', error));
+			}
+
+			this.prisma.user.findMany({
+				where: { role: 'admin', status: 'active' },
+				select: { id: true },
+			}).then((admins) => Promise.all(
+				admins.map((admin) => this.notificationsService.createNotification(
+					admin.id,
+					'payment_received',
+					'Hotel Wallet Cancellation Processed',
+					`Booking #${booking.id} cancelled: customer refunded PKR ${(Number(updatedBooking.walletRefundSummary!.customerRefunded) / 100).toFixed(2)} (90%). Admin reversal PKR ${(Number(updatedBooking.walletRefundSummary!.adminDebited) / 100).toFixed(2)}.`,
+					{
+						booking_id: booking.id,
+						refunded_amount: updatedBooking.walletRefundSummary!.customerRefunded.toString(),
+						admin_reversal_amount: updatedBooking.walletRefundSummary!.adminDebited.toString(),
+						payment_method: 'wallet',
+					},
+				)),
+			)).catch((error) => console.error('Failed to notify admins wallet cancellation:', error));
+		}
+
+		if (lastPayment && !isCashBooking && !isWalletBooking) {
+			this.notificationsService.createNotification(
+				userId,
+				'payment_received',
+				'Refund Initiated',
+				`Your online/card payment for booking #${booking.id} was marked for refund after cancellation.`,
+				{
+					booking_id: booking.id,
+					payment_method: 'online',
+					amount: totalAmountInPaisa.toString(),
+				},
+			).catch((error) => console.error('Failed to notify customer online refund:', error));
+
+			this.prisma.user.findMany({
+				where: { role: 'admin', status: 'active' },
+				select: { id: true },
+			}).then((admins) => Promise.all(
+				admins.map((admin) => this.notificationsService.createNotification(
+					admin.id,
+					'payment_received',
+					'Hotel Online Refund Marked',
+					`Booking #${booking.id} cancelled: online/card payment refund was marked for PKR ${(Number(totalAmountInPaisa) / 100).toFixed(2)}.`,
+					{
+						booking_id: booking.id,
+						payment_method: 'online',
+						amount: totalAmountInPaisa.toString(),
+					},
+				)),
+			)).catch((error) => console.error('Failed to notify admins online cancellation refund:', error));
+		}
 
 		return {
-			id: updatedBooking.id,
-			status: updatedBooking.status,
+			id: updatedBooking.booking.id,
+			status: updatedBooking.booking.status,
 			message: 'Hotel booking cancelled successfully',
 		};
 	}
@@ -988,7 +1805,7 @@ export class BookingsService {
 				},
 				quantity: booking.quantity,
 				total_amount: parseFloat(booking.total_amount.toString()),
-				manager_earnings: parseFloat(booking.total_amount.toString()) * 0.95, // 95% to manager
+				manager_earnings: parseFloat(booking.total_amount.toString()) * 0.85, // 85% to manager
 				currency: booking.currency,
 				created_at: booking.created_at.toISOString(),
 			};
@@ -1074,7 +1891,7 @@ export class BookingsService {
 		const totalRevenue = allBookings
 			.filter(b => ['CONFIRMED', 'CHECKED_IN', 'CHECKED_OUT'].includes(b.status))
 			.reduce((sum, b) => sum + parseFloat(b.total_amount.toString()), 0);
-		const managerEarnings = totalRevenue * 0.95;
+		const managerEarnings = totalRevenue * 0.85;
 		const averageBookingValue = confirmedBookings.length > 0
 			? totalRevenue / confirmedBookings.length
 			: 0;
@@ -1104,7 +1921,7 @@ export class BookingsService {
 			average_booking_value: averageBookingValue,
 			bookings_by_hotel: Object.values(bookingsByHotel).map(h => ({
 				...h,
-				manager_earnings: h.revenue * 0.95,
+				manager_earnings: h.revenue * 0.85,
 			})),
 		};
 	}
