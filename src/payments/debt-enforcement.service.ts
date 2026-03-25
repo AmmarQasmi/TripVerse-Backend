@@ -69,7 +69,7 @@ export class DebtEnforcementService {
     this.logger.log('Starting hotel debt enforcement check...');
 
     try {
-      // 1. Attempt immediate recovery
+      // 1. Attempt recovery for overdue debts only
       await this.attemptHotelDebtRecovery();
 
       // 2. Send warnings for overdue debts
@@ -108,6 +108,8 @@ export class DebtEnforcementService {
       },
     });
 
+    const now = new Date();
+
     for (const transaction of hotelDebtTransactions) {
       try {
         const { wallet } = transaction;
@@ -115,6 +117,16 @@ export class DebtEnforcementService {
         
         // Skip if already recovered or not pending
         if (metadata?.status !== 'pending') continue;
+
+        // Only attempt recovery once overdue (past dueAt)
+        const dueAtRaw = metadata?.dueAt;
+        if (!dueAtRaw) {
+          continue;
+        }
+        const dueDate = new Date(dueAtRaw);
+        if (Number.isNaN(dueDate.getTime()) || dueDate >= now) {
+          continue;
+        }
 
         const debtAmount = -(transaction.amount); // Amount is negative for debts
 
@@ -129,7 +141,7 @@ export class DebtEnforcementService {
             {
               originalTransaction: transaction.id,
               recoveredAt: new Date(),
-              recoveryType: 'immediate',
+              recoveryType: 'overdue',
             },
           );
 
@@ -141,7 +153,7 @@ export class DebtEnforcementService {
                 ...metadata,
                 status: 'recovered',
                 recoveredAt: new Date(),
-                recoveryType: 'immediate',
+                recoveryType: 'overdue',
               },
             },
           });
