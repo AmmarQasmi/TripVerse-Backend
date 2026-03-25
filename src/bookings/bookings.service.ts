@@ -603,7 +603,10 @@ export class BookingsService {
 			let hotelDebtCreated = false;
 			let autoRecoveredAmount = 0n;
 			if (normalizedPaymentMethod === 'cash') {
-				const amountInPaisa = BigInt(Math.round(totalAmount * 100));
+				// For cash bookings, the manager collects the full amount in cash.
+				// Platform should only secure its commission (15%) as debt.
+				const totalAmountInPaisa = BigInt(Math.round(totalAmount * 100));
+				const platformCommissionInPaisa = (totalAmountInPaisa * 1500n) / 10000n; // 15%
 				const dueAt = new Date(checkInDate.getTime() + 30 * 24 * 60 * 60 * 1000); // Check-in + 30 days
 
 				// Ensure hotel manager wallet exists
@@ -614,8 +617,8 @@ export class BookingsService {
 					data: {
 						wallet_id: managerWallet.id,
 						type: 'hotel_debt',
-						amount: -amountInPaisa, // Negative because it's a debt deduction
-						description: `Hotel debt for booking #${newBooking.id}`,
+						amount: -platformCommissionInPaisa, // Negative because it's a debt obligation
+						description: `Hotel commission debt (15%) for booking #${newBooking.id}`,
 						metadata: {
 							bookingId: newBooking.id,
 							hotelId: hotel_id,
@@ -628,6 +631,8 @@ export class BookingsService {
 							status: 'pending',
 							gracePeriodUntil: new Date(dueAt.getTime() + 3 * 24 * 60 * 60 * 1000).toISOString(),
 							paymentMethod: 'cash',
+							grossAmountInPaisa: totalAmountInPaisa.toString(),
+							commissionRate: 0.15,
 							createdAt: new Date().toISOString(),
 						},
 					},
@@ -687,14 +692,16 @@ export class BookingsService {
 					} else {
 						// Debt pending collection
 						const dueAt = new Date(result.booking.check_in.getTime() + 30 * 24 * 60 * 60 * 1000);
+						const totalAmountInPaisa = BigInt(Math.round(result.totalAmount * 100));
+						const platformCommissionInPaisa = (totalAmountInPaisa * 1500n) / 10000n; // 15%
 						await this.notificationsService.createNotification(
 							result.hotel.manager.user.id,
 							'booking_request',
 							'Hotel Debt Created - Payment Pending',
-							`Hotel debt of PKR ${(Number(result.totalAmount * 100) / 100).toFixed(2)} for booking #${result.booking.id} will be collected on ${dueAt.toISOString()} (check-in + 30 days). Grace period: 3 days.`,
+							`Hotel commission debt (15%) of PKR ${(Number(platformCommissionInPaisa) / 100).toFixed(2)} for booking #${result.booking.id} will be collected on ${dueAt.toISOString()} (check-in + 30 days). Grace period: 3 days.`,
 							{
 								booking_id: result.booking.id,
-								debtAmount: (result.totalAmount * 100).toFixed(0),
+								debtAmount: platformCommissionInPaisa.toString(),
 								status: 'pending',
 								dueAt: dueAt.toISOString(),
 								gracePeriodDays: 3,
@@ -767,16 +774,19 @@ export class BookingsService {
 				}
 
 				if (result.hotelDebtCreated) {
-					const debtAmountInPaisa = BigInt(Math.round(result.totalAmount * 100));
+					const grossAmountInPaisa = BigInt(Math.round(result.totalAmount * 100));
+					const debtAmountInPaisa = (grossAmountInPaisa * 1500n) / 10000n; // 15%
 					await this.notificationsService.createNotification(
 						admin.id,
 						'hotel_booking_payment_received',
 						'Hotel Cash Debt Recorded',
-						`Booking #${result.booking.id} was confirmed with cash. Hotel debt PKR ${(Number(debtAmountInPaisa) / 100).toFixed(2)} was recorded for manager settlement policy.`,
+						`Booking #${result.booking.id} was confirmed with cash. Platform commission debt (15%) PKR ${(Number(debtAmountInPaisa) / 100).toFixed(2)} was recorded for manager settlement policy.`,
 						{
 							booking_id: result.booking.id,
 							payment_method: 'cash',
 							debt_amount: debtAmountInPaisa.toString(),
+							gross_amount: grossAmountInPaisa.toString(),
+							commission_rate: 0.15,
 						},
 					);
 				}
@@ -850,7 +860,7 @@ export class BookingsService {
 			hotelDebt: result.hotelDebtCreated ? {
 				created: true,
 					dueAt: new Date(result.booking.check_in.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-				amount: (result.totalAmount * 100).toFixed(0),
+				amount: ((BigInt(Math.round(result.totalAmount * 100)) * 1500n) / 10000n).toString(),
 				autoRecovered: result.autoRecoveredAmount > 0n,
 				recoveredAmount: result.autoRecoveredAmount > 0n ? (Number(result.autoRecoveredAmount) / 100).toFixed(2) : null,
 				gracePeriodDays: 3,

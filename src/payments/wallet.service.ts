@@ -365,6 +365,11 @@ export class WalletService {
         const status = String(metadata.status || 'pending').toLowerCase();
         const isPending = status !== 'recovered' && status !== 'cancelled';
         if (isPending && debt.amount < 0n) {
+          const hasBookingId = typeof metadata.bookingId === 'number' || typeof metadata.bookingId === 'string';
+          const hasDueAt = typeof metadata.dueAt === 'string';
+          if (!hasBookingId || !hasDueAt) {
+            continue;
+          }
           pendingDebt += (0n - debt.amount);
         }
       }

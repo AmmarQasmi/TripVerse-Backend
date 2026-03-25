@@ -644,17 +644,75 @@ export class PaymentsService {
     // Get balance info
     const balance = await this.walletService.getBalance(wallet.id);
 
-    // Get pending debts
-    const pendingDebts =
-      userType === 'driver'
-        ? await this.prisma.commissionDebt.findMany({
-            where: { driver_id: userId, status: 'pending' },
-          })
-        : [];
-
     let totalPendingDebt = 0n;
-    for (const debt of pendingDebts) {
-      totalPendingDebt += BigInt(debt.amount.toString());
+    let pendingDebtCount = 0;
+    let pendingHotelDebtRows: Array<{
+      id: string;
+      bookingId: string | number | null;
+      dueDate: string | null;
+      amount: string;
+      status: string;
+      createdAt: string;
+    }> = [];
+
+    if (userType === 'driver') {
+      const pendingDebts = await this.prisma.commissionDebt.findMany({
+        where: { driver_id: userId, status: 'pending' },
+        select: { amount: true },
+      });
+      for (const debt of pendingDebts) {
+        totalPendingDebt += BigInt(debt.amount.toString());
+      }
+      pendingDebtCount = pendingDebts.length;
+    } else if (userType === 'hotel_manager') {
+      const hotelDebtTxs = await this.prisma.walletTransaction.findMany({
+        where: {
+          wallet_id: wallet.id,
+          type: TransactionType.HOTEL_DEBT,
+        },
+        orderBy: { created_at: 'desc' },
+        select: {
+          id: true,
+          amount: true,
+          metadata: true,
+          created_at: true,
+        },
+      });
+
+      const pendingRows = hotelDebtTxs
+        .map((tx) => {
+          const metadata = (tx.metadata || {}) as Record<string, any>;
+          const status = String(metadata.status || 'pending').toLowerCase();
+          const isPending = status !== 'recovered' && status !== 'cancelled';
+          if (!isPending || tx.amount >= 0n) {
+            return null;
+          }
+          const dueAt = typeof metadata.dueAt === 'string' ? metadata.dueAt : null;
+          const bookingId =
+            typeof metadata.bookingId === 'number' || typeof metadata.bookingId === 'string'
+              ? metadata.bookingId
+              : null;
+          // Ignore legacy/orphan hotel debt rows missing required linkage fields.
+          if (!bookingId || !dueAt) {
+            return null;
+          }
+          const amount = -tx.amount;
+          return {
+            id: tx.id,
+            bookingId,
+            dueDate: dueAt,
+            amount: amount.toString(),
+            status: status || 'pending',
+            createdAt: tx.created_at.toISOString(),
+          };
+        })
+        .filter((row): row is NonNullable<typeof row> => Boolean(row));
+
+      for (const row of pendingRows) {
+        totalPendingDebt += BigInt(row.amount);
+      }
+      pendingDebtCount = pendingRows.length;
+      pendingHotelDebtRows = pendingRows;
     }
 
     // Split earnings from self-funded topups for accurate reporting.
@@ -679,7 +737,8 @@ export class PaymentsService {
       },
       debts: {
         pending: totalPendingDebt.toString(),
-        count: pendingDebts.length,
+        count: pendingDebtCount,
+        items: userType === 'hotel_manager' ? pendingHotelDebtRows : undefined,
       },
       earnings: {
         total: totalEarnedFromTrips.toString(),
@@ -932,7 +991,14 @@ export class PaymentsService {
         const metadata = (debt.metadata || {}) as Record<string, any>;
         const status = String(metadata.status || 'pending').toLowerCase();
         const isPending = status !== 'recovered' && status !== 'cancelled';
+        // Keep withdrawal eligibility aligned with earnings debt logic:
+        // ignore legacy/orphan hotel debt rows missing booking linkage/due date.
+        const hasBookingId = typeof metadata.bookingId === 'number' || typeof metadata.bookingId === 'string';
+        const hasDueAt = typeof metadata.dueAt === 'string';
         if (isPending && debt.amount < 0n) {
+          if (!hasBookingId || !hasDueAt) {
+            continue;
+          }
           // Convert negative bigint to positive for calculation
           pendingHotelDebt += (0n - debt.amount);
         }
