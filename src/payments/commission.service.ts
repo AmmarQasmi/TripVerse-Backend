@@ -2,6 +2,7 @@ import { Injectable, BadRequestException, NotFoundException } from '@nestjs/comm
 import { PrismaService } from '../prisma/prisma.service';
 import { CommissionDebt } from '@prisma/client';
 import { WalletService, TransactionType } from './wallet.service';
+import { COMMISSION_POLICY } from '../common/utils/constants';
 
 @Injectable()
 export class CommissionService {
@@ -12,7 +13,8 @@ export class CommissionService {
 
   /**
    * ONLINE PAYMENT: Immediate commission deduction
-   * 15% total = 6.5% platform + 8.5% tax reserve
+   * 15% total (85% net commission + 15% tax reserve)
+   * = 12.75% net commission + 2.25% tax reserve
    */
   async processOnlineCommission(
     bookingId: number,
@@ -93,23 +95,24 @@ export class CommissionService {
 
   /**
    * CASH PAYMENT: Create debt record
-   * 15% owed by driver (6.5% platform + 8.5% tax)
-   * Due date: 15 days from now
+   * 15% total owed by driver/provider
+   * Due date: check-in + 30 days for hotel, 15 days for driver
    */
   async processCashBooking(
     bookingId: number,
     driverId: number,
     finalAmountInPaisa: bigint,
+    daysUntilDue: number = 15,
   ): Promise<CommissionDebt> {
     // Ensure wallet exists for driver
     await this.walletService.ensureWallet(driverId, 'driver');
 
-    // Calculate commission
+    // Calculate commission (15% total)
     const commissionInPaisa = this.calculateTotalCommission(finalAmountInPaisa);
 
     // Create debt record
     const dueDate = new Date();
-    dueDate.setDate(dueDate.getDate() + 15); // Due in 15 days
+    dueDate.setDate(dueDate.getDate() + daysUntilDue);
 
     const debt = await this.prisma.commissionDebt.create({
       data: {
@@ -207,32 +210,35 @@ export class CommissionService {
 
   /**
    * Get commission breakdown for admin
+   * Platform: 15% total (85% net commission + 15% tax reserve)
    */
-  getCommissionBreakdown(): { platform: number; tax: number } {
+  getCommissionBreakdown(): { platformShare: number; providerShare: number; netCommission: number; taxReserve: number } {
     return {
-      platform: 6.5,
-      tax: 8.5,
+      platformShare: 15, // 15% of gross
+      providerShare: 85, // 85% of gross
+      netCommission: 12.75, // 85% of 15%
+      taxReserve: 2.25, // 15% of 15%
     };
   }
 
   /**
-   * Calculate platform commission (6.5%)
+   * Calculate net commission (12.75% of gross = 85% of platform's 15%)
    */
   private calculatePlatformCommission(finalAmountInPaisa: bigint): bigint {
-    return (finalAmountInPaisa * 65n) / 1000n; // 6.5%
+    return (finalAmountInPaisa * 1275n) / 10000n; // 12.75%
   }
 
   /**
-   * Calculate tax reserve (8.5%)
+   * Calculate tax reserve (2.25% of gross = 15% of platform's 15%)
    */
   private calculateTaxReserve(finalAmountInPaisa: bigint): bigint {
-    return (finalAmountInPaisa * 85n) / 1000n; // 8.5%
+    return (finalAmountInPaisa * 225n) / 10000n; // 2.25%
   }
 
   /**
-   * Calculate total commission (15%)
+   * Calculate total commission (15% of gross)
    */
   private calculateTotalCommission(finalAmountInPaisa: bigint): bigint {
-    return (finalAmountInPaisa * 150n) / 1000n; // 15%
+    return (finalAmountInPaisa * 1500n) / 10000n; // 15%
   }
 }

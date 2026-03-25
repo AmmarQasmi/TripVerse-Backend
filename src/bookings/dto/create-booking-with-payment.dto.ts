@@ -1,4 +1,4 @@
-import { IsInt, IsString, IsNotEmpty, IsOptional, Min, Max, IsDateString, Matches } from 'class-validator';
+import { IsInt, IsString, IsNotEmpty, IsOptional, Min, Max, Matches, IsBoolean } from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class CreateBookingWithPaymentDto {
@@ -47,4 +47,8 @@ export class CreateBookingWithPaymentDto {
   @IsString()
   @IsOptional()
   payment_method?: string; // 'card' | 'cash' — simulated for now
+
+  @IsBoolean()
+  @IsOptional()
+  cash_policy_acknowledged?: boolean;
 }

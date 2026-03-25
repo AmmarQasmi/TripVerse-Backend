@@ -139,6 +139,106 @@ export class PaymentsController {
     );
   }
 
+  @Get('/admin/payments/debts/drivers')
+  @UseGuards(JwtAuthGuard)
+  async getDriverDebts(
+    @Request() req: any,
+    @Query('status') status: string = 'pending',
+    @Query('limit') limit: string = '50',
+    @Query('offset') offset: string = '0',
+  ) {
+    if (req.user.role !== 'admin') {
+      throw new ForbiddenException('Admin only');
+    }
+    return this.paymentsService.getDriverDebts(
+      status as any,
+      parseInt(limit),
+      parseInt(offset),
+    );
+  }
+
+  @Get('/admin/payments/debts/hotels')
+  @UseGuards(JwtAuthGuard)
+  async getHotelDebts(
+    @Request() req: any,
+    @Query('status') status: string = 'pending',
+    @Query('limit') limit: string = '50',
+    @Query('offset') offset: string = '0',
+  ) {
+    if (req.user.role !== 'admin') {
+      throw new ForbiddenException('Admin only');
+    }
+    return this.paymentsService.getHotelDebts(
+      status as any,
+      parseInt(limit),
+      parseInt(offset),
+    );
+  }
+
+  @Get('/admin/payments/debts/drivers/:debtId')
+  @UseGuards(JwtAuthGuard)
+  async getDriverDebtDetail(@Request() req: any, @Param('debtId') debtId: string) {
+    if (req.user.role !== 'admin') {
+      throw new ForbiddenException('Admin only');
+    }
+    return this.paymentsService.getDriverDebtDetail(debtId);
+  }
+
+  @Get('/admin/payments/debts/hotels/:transactionId')
+  @UseGuards(JwtAuthGuard)
+  async getHotelDebtDetail(@Request() req: any, @Param('transactionId') transactionId: string) {
+    if (req.user.role !== 'admin') {
+      throw new ForbiddenException('Admin only');
+    }
+    return this.paymentsService.getHotelDebtDetail(transactionId);
+  }
+
+  @Get('/wallet/withdrawal/eligibility')
+  @UseGuards(JwtAuthGuard)
+  async getWithdrawalEligibility(@Request() req: any) {
+    return this.paymentsService.getWithdrawalEligibility(req.user.id, req.user.role);
+  }
+
+  @Post('/wallet/withdrawal/initiate')
+  @UseGuards(JwtAuthGuard)
+  async initiateWithdrawal(
+    @Request() req: any,
+    @Body()
+    body: {
+      amountInPaisa: string;
+      bankAccountNumber?: string;
+      bankRoutingNumber?: string;
+      bankHolderName?: string;
+      paymentMethod?: 'stripe_payout' | 'manual_transfer';
+    },
+  ) {
+    return this.paymentsService.initiateWithdrawal(req.user.id, req.user.role, BigInt(body.amountInPaisa), {
+      bankAccountNumber: body.bankAccountNumber,
+      bankRoutingNumber: body.bankRoutingNumber,
+      bankHolderName: body.bankHolderName,
+      paymentMethod: body.paymentMethod,
+    });
+  }
+
+  @Post('/admin/wallet/withdrawal/:transactionId/approve')
+  @UseGuards(JwtAuthGuard)
+  async approveManualWithdrawal(
+    @Request() req: any,
+    @Param('transactionId') transactionId: string,
+    @Body() body?: { approverNotes?: string },
+  ) {
+    if (req.user.role !== 'admin') {
+      throw new ForbiddenException('Admin only');
+    }
+    return this.paymentsService.approveManualWithdrawal(transactionId, body?.approverNotes);
+  }
+
+  @Get('/wallet/withdrawal/:transactionId/status')
+  @UseGuards(JwtAuthGuard)
+  async getWithdrawalStatus(@Param('transactionId') transactionId: string) {
+    return this.paymentsService.getWithdrawalStatus(transactionId);
+  }
+
   /**
    * Endpoint 6: GET /driver/earnings/summary
    * Driver earnings summary

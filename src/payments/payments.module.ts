@@ -8,9 +8,10 @@ import { CommissionService } from './commission.service';
 import { DisputeRefundService } from './dispute-refund.service';
 import { DebtEnforcementService } from './debt-enforcement.service';
 import { PrismaModule } from '../prisma/prisma.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
-	imports: [PrismaModule, ConfigModule],
+	imports: [PrismaModule, ConfigModule, NotificationsModule],
 	controllers: [PaymentsController, StripeWebhookController],
 	providers: [
 		PaymentsService,

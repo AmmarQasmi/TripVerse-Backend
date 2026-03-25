@@ -479,8 +479,8 @@ export class HotelManagersService {
 		]);
 
 		const totalEarnings = parseFloat(earningsResult._sum.total_amount?.toString() || '0');
-		// Platform commission is 5%, manager gets 95%
-		const grossManagerEarnings = totalEarnings * 0.95;
+		// Platform share is 15%, manager gets 85%
+		const grossManagerEarnings = totalEarnings * 0.85;
 
 		// Deduct fines from resolved disputes against this hotel manager
 		const hotelFinesResult = await this.prisma.dispute.aggregate({
@@ -592,7 +592,7 @@ export class HotelManagersService {
 		});
 
 		const totalEarnings = parseFloat(earningsResult._sum.total_amount?.toString() || '0');
-		const grossManagerEarnings = totalEarnings * 0.95; // 95% to manager
+		const grossManagerEarnings = totalEarnings * 0.85; // 85% to manager
 
 		// Deduct fines from resolved disputes
 		const finesResult = await this.prisma.dispute.aggregate({
@@ -614,7 +614,7 @@ export class HotelManagersService {
 				hotel: booking.hotel.name,
 				room_type: booking.room_type.name,
 				total_amount: parseFloat(booking.total_amount.toString()),
-				manager_earnings: parseFloat(booking.total_amount.toString()) * 0.95,
+				manager_earnings: parseFloat(booking.total_amount.toString()) * 0.85,
 				created_at: booking.created_at.toISOString(),
 			})),
 		};
@@ -661,7 +661,7 @@ export class HotelManagersService {
 
 		for (const booking of bookings) {
 			const month = booking.created_at.toISOString().substring(0, 7); // YYYY-MM
-			const amount = parseFloat(booking.total_amount.toString()) * 0.95; // Manager gets 95%
+			const amount = parseFloat(booking.total_amount.toString()) * 0.85; // Manager gets 85%
 			
 			byMonth[month] = (byMonth[month] || 0) + amount;
 			

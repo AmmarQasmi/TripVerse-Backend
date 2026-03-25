@@ -1223,7 +1223,7 @@ export class HotelsService {
 				(sum, booking) => sum + parseFloat(booking.total_amount.toString()),
 				0
 			);
-			const managerEarnings = totalEarnings * 0.95; // 95% to manager
+			const managerEarnings = totalEarnings * 0.85; // 85% to manager
 
 			return {
 				id: hotel.id.toString(),

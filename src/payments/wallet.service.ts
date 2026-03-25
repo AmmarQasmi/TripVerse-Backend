@@ -10,6 +10,8 @@ export enum TransactionType {
   TAX_RESERVE = 'tax_reserve',
   DEBT_REPAYMENT = 'debt_repayment',
   RENEWAL_FEE = 'renewal_fee',
+  HOTEL_DEBT = 'hotel_debt',
+  BANK_TRANSFER = 'bank_transfer',
 }
 
 @Injectable()
@@ -275,16 +277,119 @@ export class WalletService {
   }
 
   /**
-   * Calculate tax reserve for a commission amount (8.5%)
+   * Force deduct debt even if balance goes negative (hotel debt collection)
+   * Called by debt enforcement service
    */
-  calculateTaxReserve(commissionAmountInPaisa: bigint): bigint {
-    return (commissionAmountInPaisa * 85n) / 1000n; // 8.5%
+  async forceDeductForDebt(
+    walletId: string,
+    amountInPaisa: bigint,
+    metadata?: Record<string, any>,
+  ): Promise<Wallet> {
+    // Record transaction (negative for deduction)
+    await this.recordTransaction(walletId, TransactionType.HOTEL_DEBT, -amountInPaisa, metadata);
+
+    // Update balance - allow negative
+    return this.prisma.wallet.update({
+      where: { id: walletId },
+      data: {
+        balance: {
+          decrement: amountInPaisa,
+        },
+      },
+    });
   }
 
   /**
-   * Calculate platform commission (6.5% of final amount)
+   * Record bank transfer (to bank, not within wallet)
+   */
+  async recordBankTransfer(
+    walletId: string,
+    amountInPaisa: bigint,
+    transferMethod: string,
+    metadata?: Record<string, any>,
+  ): Promise<WalletTransaction> {
+    // First deduct from wallet
+    await this.deductBalance(walletId, amountInPaisa, TransactionType.BANK_TRANSFER, {
+      ...metadata,
+      transferMethod,
+      transferredAt: new Date(),
+    });
+
+    // Record the transaction
+    return this.recordTransaction(walletId, TransactionType.BANK_TRANSFER, -amountInPaisa, {
+      ...metadata,
+      transferMethod,
+    });
+  }
+
+  /**
+   * Get available balance for withdrawal (balance minus pending debt)
+   */
+  async getWithdrawableBalance(walletId: string, userType: string, userId: number): Promise<{
+    total: bigint;
+    pendingDebt: bigint;
+    withdrawable: bigint;
+  }> {
+    const wallet = await this.prisma.wallet.findUnique({
+      where: { id: walletId },
+    });
+
+    if (!wallet) {
+      throw new NotFoundException('Wallet not found');
+    }
+
+    // Get pending debts
+    let pendingDebt = 0n;
+
+    if (userType === 'driver') {
+      const debts = await this.prisma.commissionDebt.findMany({
+        where: {
+          driver_id: userId,
+          status: 'pending',
+        },
+      });
+      for (const debt of debts) {
+        pendingDebt += BigInt(debt.amount.toString());
+      }
+    } else if (userType === 'hotel_manager') {
+      // Hotel manager debts tracked via wallet transactions with metadata
+      const hotelDebts = await this.prisma.walletTransaction.findMany({
+        where: {
+          wallet_id: walletId,
+          type: TransactionType.HOTEL_DEBT,
+        },
+      });
+      // Sum all negative hotel debt transactions (not yet recovered)
+      for (const debt of hotelDebts) {
+        const metadata = (debt.metadata || {}) as Record<string, any>;
+        const status = String(metadata.status || 'pending').toLowerCase();
+        const isPending = status !== 'recovered' && status !== 'cancelled';
+        if (isPending && debt.amount < 0n) {
+          pendingDebt += (0n - debt.amount);
+        }
+      }
+    }
+
+    const available = wallet.balance - wallet.reserved - wallet.locked - pendingDebt;
+
+    return {
+      total: wallet.balance,
+      pendingDebt,
+      withdrawable: available > 0n ? available : 0n,
+    };
+  }
+
+  /**
+   * Calculate net commission (12.75% of final amount = 85% of 15%)
    */
   calculatePlatformCommission(finalAmountInPaisa: bigint): bigint {
-    return (finalAmountInPaisa * 65n) / 1000n; // 6.5%
+    return (finalAmountInPaisa * 1275n) / 10000n; // 12.75%
   }
-}
+
+  /**
+   * Calculate tax reserve (2.25% of final amount = 15% of 15%)
+   */
+  calculateTaxReserve(commissionAmountInPaisa: bigint): bigint {
+    return (commissionAmountInPaisa * 225n) / 10000n; // 2.25%
+  }
+  }

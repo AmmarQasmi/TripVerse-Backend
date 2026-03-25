@@ -390,10 +390,9 @@ export class PaymentsService {
       bucket.amount += amount;
     }
 
-    // Cash/debt recovery is a 15% pool. Split it into platform/tax shares.
-    // Platform (6.5% of 15%): 65/150
-    // Tax (8.5% of 15%): 85/150
-    const debtRecoveredPlatformShare = (debtRecoveredTotal * 65n) / 150n;
+    // Cash/debt recovery is platform's 15% pool.
+    // Internal split of that pool: 85% net commission, 15% tax reserve.
+    const debtRecoveredPlatformShare = (debtRecoveredTotal * 85n) / 100n;
     const debtRecoveredTaxShare = debtRecoveredTotal - debtRecoveredPlatformShare;
 
     const effectivePlatformCommission =
@@ -494,6 +493,145 @@ export class PaymentsService {
       total,
       limit,
       offset,
+    };
+  }
+
+  async getDriverDebts(status: 'pending' | 'paid' | 'all', limit: number, offset: number) {
+    return this.getAllDebts(status, limit, offset);
+  }
+
+  async getHotelDebts(status: 'pending' | 'paid' | 'all', limit: number, offset: number) {
+    const txs = await this.prisma.walletTransaction.findMany({
+      where: {
+        type: TransactionType.HOTEL_DEBT,
+        wallet: {
+          user: {
+            role: 'hotel_manager',
+          },
+        },
+      },
+      include: {
+        wallet: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                full_name: true,
+                email: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { created_at: 'desc' },
+      take: limit,
+      skip: offset,
+    });
+
+    const normalized = txs
+      .map((tx) => {
+        const metadata = (tx.metadata || {}) as Record<string, any>;
+        const debtStatus = metadata.status || 'pending';
+        const amount = tx.amount < 0n ? -tx.amount : tx.amount;
+        return {
+          id: tx.id,
+          managerId: tx.wallet.user?.id,
+          managerName: tx.wallet.user?.full_name,
+          managerEmail: tx.wallet.user?.email,
+          bookingId: metadata.bookingId,
+          amount: amount.toString(),
+          status: debtStatus,
+          dueDate: metadata.dueAt || null,
+          paidAt: metadata.recoveredAt || null,
+          createdAt: tx.created_at,
+        };
+      })
+      .filter((row) => (status === 'all' ? true : row.status === status));
+
+    return {
+      debts: normalized,
+      total: normalized.length,
+      limit,
+      offset,
+    };
+  }
+
+  async getDriverDebtDetail(debtId: string) {
+    const debt = await this.prisma.commissionDebt.findUnique({
+      where: { id: debtId },
+      include: {
+        driver: {
+          select: {
+            id: true,
+            full_name: true,
+            email: true,
+          },
+        },
+      },
+    });
+
+    if (!debt) {
+      throw new NotFoundException('Driver debt not found');
+    }
+
+    return {
+      id: debt.id,
+      type: 'driver',
+      actor: {
+        id: debt.driver.id,
+        name: debt.driver.full_name,
+        email: debt.driver.email,
+      },
+      bookingId: debt.booking_id,
+      amount: debt.amount.toString(),
+      dueDate: debt.due_date,
+      status: debt.status,
+      paidAt: debt.paid_at,
+      createdAt: debt.created_at,
+      updatedAt: debt.updated_at,
+    };
+  }
+
+  async getHotelDebtDetail(transactionId: string) {
+    const tx = await this.prisma.walletTransaction.findUnique({
+      where: { id: transactionId },
+      include: {
+        wallet: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                full_name: true,
+                email: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!tx || tx.type !== TransactionType.HOTEL_DEBT) {
+      throw new NotFoundException('Hotel debt not found');
+    }
+
+    const metadata = (tx.metadata || {}) as Record<string, any>;
+    const amount = tx.amount < 0n ? -tx.amount : tx.amount;
+
+    return {
+      id: tx.id,
+      type: 'hotel',
+      actor: {
+        id: tx.wallet.user?.id,
+        name: tx.wallet.user?.full_name,
+        email: tx.wallet.user?.email,
+      },
+      bookingId: metadata.bookingId,
+      amount: amount.toString(),
+      dueDate: metadata.dueAt || null,
+      status: metadata.status || 'pending',
+      paidAt: metadata.recoveredAt || null,
+      createdAt: tx.created_at,
+      metadata,
     };
   }
 
@@ -761,7 +899,288 @@ export class PaymentsService {
       },
     };
   }
+
+  /**
+   * Check withdrawal eligibility for a user
+   * Available = Balance - Pending Debt - Reserved - Locked
+   */
+  async getWithdrawalEligibility(userId: number, userType: string) {
+    const wallet = await this.walletService.ensureWallet(userId, userType);
+    const balance = await this.walletService.getBalance(wallet.id);
+
+    // Get pending debts (driver commission debts)
+    let pendingDebtAmount = 0n;
+    if (userType === 'driver') {
+      const debts = await this.prisma.commissionDebt.findMany({
+        where: { driver_id: userId, status: 'pending' },
+      });
+      for (const debt of debts) {
+        pendingDebtAmount += BigInt(debt.amount.toString());
+      }
+    }
+
+    // Get pending hotel debts (for hotel managers)
+    let pendingHotelDebt = 0n;
+    if (userType === 'hotel_manager') {
+      const hotelDebts = await this.prisma.walletTransaction.findMany({
+        where: {
+          wallet_id: wallet.id,
+          type: 'hotel_debt',
+        },
+      });
+      for (const debt of hotelDebts) {
+        const metadata = (debt.metadata || {}) as Record<string, any>;
+        const status = String(metadata.status || 'pending').toLowerCase();
+        const isPending = status !== 'recovered' && status !== 'cancelled';
+        if (isPending && debt.amount < 0n) {
+          // Convert negative bigint to positive for calculation
+          pendingHotelDebt += (0n - debt.amount);
+        }
+      }
+    }
+
+    const totalPendingDebt = userType === 'admin' ? 0n : pendingDebtAmount + pendingHotelDebt;
+    const eligibleAmount = balance.available - totalPendingDebt;
+
+    return {
+      walletId: wallet.id,
+      totalBalance: balance.balance.toString(),
+      reserved: balance.reserved.toString(),
+      locked: balance.locked.toString(),
+      available: balance.available.toString(),
+      pendingDebts: totalPendingDebt.toString(),
+      eligibleForWithdrawal: (eligibleAmount > 0n ? eligibleAmount : 0n).toString(),
+      canWithdraw: eligibleAmount > 0n,
+      minimumWithdrawalAmount: '50000', // PKR 500 minimum in paisa
+    };
+  }
+
+  /**
+   * Initiate bank transfer withdrawal for driver/hotel_manager
+   * Supports Stripe payout + manual transfer fallback
+   */
+  async initiateWithdrawal(
+    userId: number,
+    userType: string,
+    amountInPaisa: bigint,
+    bankDetails?: {
+      bankAccountNumber?: string;
+      bankRoutingNumber?: string;
+      bankHolderName?: string;
+      paymentMethod?: 'stripe_payout' | 'manual_transfer';
+    },
+  ) {
+    if (userType !== 'driver' && userType !== 'hotel_manager' && userType !== 'admin') {
+      throw new BadRequestException('Only driver, hotel_manager, and admin can withdraw funds');
+    }
+
+    // Check eligibility
+    const eligibility = await this.getWithdrawalEligibility(userId, userType);
+    const eligibleAmount = BigInt(eligibility.eligibleForWithdrawal);
+    
+    if (amountInPaisa <= 0n) {
+      throw new BadRequestException('Withdrawal amount must be greater than 0');
+    }
+
+    if (amountInPaisa < BigInt(eligibility.minimumWithdrawalAmount)) {
+      throw new BadRequestException(
+        `Minimum withdrawal amount is PKR 500 (${eligibility.minimumWithdrawalAmount} paisa)`,
+      );
+    }
+
+    if (amountInPaisa > eligibleAmount) {
+      throw new BadRequestException(
+        `Insufficient eligible balance. Available: ${eligibleAmount.toString()}, Requested: ${amountInPaisa.toString()}`,
+      );
+    }
+
+    const wallet = await this.walletService.ensureWallet(userId, userType);
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    // Determine which payment method to use
+    const paymentMethod = bankDetails?.paymentMethod || 'stripe_payout';
+    let stripePayoutId: string | null = null;
+
+    try {
+      if (paymentMethod === 'stripe_payout' && user.role === 'driver') {
+        // Try Stripe payout first for drivers
+        const driver = await this.prisma.driver.findUnique({
+          where: { user_id: userId },
+        });
+
+        if (driver?.stripe_account_id) {
+          const stripe = this.getStripeClient();
+          try {
+            const payout = await stripe.payouts.create(
+              {
+                amount: Number(amountInPaisa),
+                currency: 'pkr',
+                description: `TripVerse withdrawal for ${user.full_name}`,
+              },
+              {
+                stripeAccount: driver.stripe_account_id,
+              },
+            );
+            stripePayoutId = payout.id;
+          } catch (stripeError) {
+            // Fall back to manual transfer
+            console.warn('Stripe payout failed, falling back to manual transfer:', stripeError);
+          }
+        }
+      }
+
+      // Create wallet transaction record
+      const transaction = await this.prisma.walletTransaction.create({
+        data: {
+          wallet_id: wallet.id,
+          type: TransactionType.BANK_TRANSFER,
+          amount: -amountInPaisa, // Negative because it's going out
+          description: `Bank transfer withdrawal - ${paymentMethod}`,
+          metadata: {
+            withdrawalType: 'bank_transfer',
+            paymentMethod,
+            stripePayoutId,
+            bankDetails: {
+              ...bankDetails,
+              bankAccountNumber: bankDetails?.bankAccountNumber ? `****${bankDetails.bankAccountNumber.slice(-4)}` : undefined,
+            },
+            status: stripePayoutId ? 'stripe_processing' : 'pending_manual',
+            initiatedAt: new Date(),
+            userId,
+            userType,
+          },
+        },
+      });
+
+      // Deduct from wallet
+      await this.prisma.wallet.update({
+        where: { id: wallet.id },
+        data: {
+          balance: {
+            decrement: amountInPaisa,
+          },
+        },
+      });
+
+      return {
+        success: true,
+        transactionId: transaction.id,
+        amount: (Number(amountInPaisa) / 100).toFixed(2),
+        currency: 'pkr',
+        status: stripePayoutId ? 'processing' : 'pending_manual_approval',
+        message: stripePayoutId 
+          ? 'Withdrawal initiated via Stripe payout and will be processed within 2-3 business days'
+          : 'Withdrawal submitted for manual processing. Admin will complete within 24 hours',
+        stripePayoutId,
+        details: {
+          walletId: wallet.id,
+          remainingBalance: (Number((eligibleAmount - amountInPaisa)) / 100).toFixed(2),
+          fee: '0', // No platform fee on withdrawals
+        },
+      };
+    } catch (error) {
+      throw new BadRequestException(
+        `Withdrawal initiation failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    }
+  }
+
+  /**
+   * Admin endpoint to approve/complete manual withdrawal
+   */
+  async approveManualWithdrawal(
+    transactionId: string,
+    approverNotes?: string,
+  ) {
+    const transaction = await this.prisma.walletTransaction.findUnique({
+      where: { id: transactionId },
+      include: { wallet: { include: { user: true } } },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    const metadata = (transaction.metadata as Record<string, any>) || {};
+    
+    if (metadata.status !== 'pending_manual') {
+      throw new BadRequestException('This transaction is not pending manual approval');
+    }
+
+    // Update transaction to completed
+    const updatedTx = await this.prisma.walletTransaction.update({
+      where: { id: transactionId },
+      data: {
+        metadata: {
+          ...metadata,
+          status: 'completed',
+          completedAt: new Date(),
+          approverNotes,
+        },
+      },
+    });
+
+    return {
+      success: true,
+      transactionId: updatedTx.id,
+      message: 'Manual withdrawal approved and processed',
+      amount: (Number(updatedTx.amount) / 100).toFixed(2),
+      currency: 'pkr',
+      status: 'completed',
+      completedAt: (updatedTx.metadata as any)?.completedAt,
+      notes: approverNotes,
+    };
+  }
+
+  /**
+   * Check withdrawal status for tracking
+   */
+  async getWithdrawalStatus(transactionId: string) {
+    const transaction = await this.prisma.walletTransaction.findUnique({
+      where: { id: transactionId },
+      include: {
+        wallet: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                full_name: true,
+                email: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    const metadata = (transaction.metadata as Record<string, any>) || {};
+
+    return {
+      transactionId: transaction.id,
+      userId: transaction.wallet.user.id,
+      userName: transaction.wallet.user.full_name,
+      amount: (Number(transaction.amount) / 100).toFixed(2),
+      currency: 'pkr',
+      status: metadata.status || 'unknown',
+      paymentMethod: metadata.paymentMethod,
+      stripePayoutId: metadata.stripePayoutId,
+      initiatedAt: transaction.created_at,
+      completedAt: metadata.completedAt,
+      approverNotes: metadata.approverNotes,
+      bankDetails: metadata.bankDetails,
+    };
+  }
 }
+
+
 
 
 
