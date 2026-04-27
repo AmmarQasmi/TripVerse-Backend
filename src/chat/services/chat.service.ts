@@ -18,6 +18,8 @@ export interface ChatResponse {
   context: Record<string, any>;
   previewData?: any;
   itineraryId?: number;
+  /** True if backend is generating full preview in background */
+  pendingPreviewExpansion?: boolean;
   isComplete: boolean;
 }
 
@@ -26,6 +28,7 @@ export class ChatService {
   private readonly logger = new Logger(ChatService.name);
   private readonly MAX_HISTORY_MESSAGES = 30;
   private readonly SESSION_EXPIRY_HOURS = 24;
+  private readonly MAX_HISTORY_TOKENS = 12000;
 
   constructor(
     private prisma: PrismaService,
@@ -91,6 +94,47 @@ export class ChatService {
       throw new BadRequestException('This session has expired. Please start a new one.');
     }
 
+    // Idempotency / shaky-internet protection:
+    // If the client re-sends the exact same message (e.g., due to cellular drop),
+    // replay the last successful assistant response instead of calling Gemini again.
+    // This preserves the exact user experience while avoiding duplicate token usage.
+    const lastTwo = await this.prisma.aiChatMessage.findMany({
+      where: { session_id: sessionId },
+      orderBy: { created_at: 'desc' },
+      take: 2,
+      select: { role: true, content: true, metadata: true },
+    });
+    const last = lastTwo[0];
+    const prev = lastTwo[1];
+    const lastMeta = (last?.metadata || {}) as Record<string, any>;
+    if (
+      last?.role === AiMessageRole.assistant &&
+      !lastMeta.isError &&
+      prev?.role === AiMessageRole.user &&
+      prev.content === message
+    ) {
+      let previewData: any | undefined;
+      let itineraryId: number | undefined;
+
+      if (lastMeta.itineraryId) {
+        itineraryId = Number(lastMeta.itineraryId);
+        const itin = await this.prisma.generatedItinerary.findUnique({
+          where: { id: itineraryId },
+          select: { preview_data: true },
+        });
+        previewData = itin?.preview_data as any;
+      }
+
+      return {
+        sessionId,
+        message: last.content,
+        context: (session.slots as Record<string, any>) || {},
+        ...(previewData ? { previewData } : {}),
+        ...(itineraryId ? { itineraryId } : {}),
+        isComplete: false,
+      };
+    }
+
     // Load history BEFORE saving user message (proper Gemini alternation)
     const history = await this.loadConversationHistory(sessionId);
 
@@ -102,6 +146,8 @@ export class ChatService {
 
     // Route to agent
     let agentResponse: any;
+    let assistantMetadata: any | undefined;
+    let pendingPreviewExpansion = false;
 
     try {
       if (session.agent_type === AiAgentType.ITINERARY_GENERATOR) {
@@ -121,28 +167,33 @@ export class ChatService {
       this.logger.error(`Agent error: ${error.message}`, error.stack);
       // Return detailed error info so the user knows what happened
       const errorHint = error.message?.toLowerCase() || '';
-      let userMessage = "I'm sorry, I ran into an issue processing your message. Could you try again in a moment?";
+      let userMessage = error.message || "I'm sorry, I ran into an issue processing your message. Could you try again in a moment?";
 
       if (errorHint.includes('rate limit') || errorHint.includes('quota') || errorHint.includes('429')) {
-        userMessage = "I'm currently experiencing high demand. Please wait a minute and try again. 🙏";
+        userMessage = error.message || "I'm currently experiencing high demand. Please wait a minute and try again. 🙏";
       } else if (errorHint.includes('unavailable') || errorHint.includes('503')) {
-        userMessage = "The AI service is temporarily unavailable. Please try again in a few seconds.";
+        userMessage = error.message || "The AI service is temporarily unavailable. Please try again in a few seconds.";
       } else if (errorHint.includes('api key') || errorHint.includes('not initialized')) {
         userMessage = "There's a configuration issue on our end. Please contact support.";
       } else if (errorHint.includes('too long') || errorHint.includes('token')) {
         userMessage = "That conversation got quite long! Try starting a new chat session.";
       }
 
+      const recoveredContext = this.recoverContextFromMessage(message, sessionContext, session.agent_type);
+
       agentResponse = {
         text: userMessage,
-        context: sessionContext,
+        context: recoveredContext,
       };
+      assistantMetadata = { isError: true, errorHint };
     }
 
     // Save assistant response
     const assistantMsgId = await this.saveMessage(sessionId, AiMessageRole.assistant, agentResponse.text, {
       tokenCount: agentResponse.tokenCount,
       hasPreview: !!agentResponse.previewData,
+      previewPhase: agentResponse.previewPhase,
+      ...(assistantMetadata || {}),
     });
 
     // Update session context
@@ -157,26 +208,46 @@ export class ChatService {
       },
     });
 
-    // If preview was generated, save it as a new itinerary (status: preview)
+    // If preview was generated:
+    // - compact preview: start background expansion, do not persist preview_data yet (enrichment needs full preview)
+    // - full preview: persist immediately
     let itineraryId: number | undefined;
     if (agentResponse.previewData) {
-      try {
-        const itinerary = await this.itineraryService.createFromPreview(
-          userId,
-          sessionId,
-          agentResponse.previewData,
-          agentResponse.context,
-        );
-        itineraryId = itinerary.id;
-        this.logger.log(`Saved preview itinerary ${itinerary.id} for session ${sessionId}`);
-
-        // Update the assistant message metadata with the itinerary ID so it survives re-fetches
-        await this.prisma.aiChatMessage.update({
-          where: { id: assistantMsgId },
-          data: { metadata: { tokenCount: agentResponse.tokenCount, hasPreview: true, itineraryId: itinerary.id } },
+      if (agentResponse.previewPhase === 'compact') {
+        pendingPreviewExpansion = true;
+        // Fire-and-forget background expansion to full preview
+        setImmediate(() => {
+          this.expandCompactPreviewToFull({
+            userId,
+            sessionId,
+            assistantMsgId,
+            userMessage: message,
+            history,
+            sessionContext: agentResponse.context,
+            tokenCount: agentResponse.tokenCount,
+          }).catch((err: any) => {
+            this.logger.error(`Background preview expansion failed: ${err.message}`);
+          });
         });
-      } catch (err: any) {
-        this.logger.error(`Failed to save preview: ${err.message}`);
+      } else {
+        try {
+          const itinerary = await this.itineraryService.createFromPreview(
+            userId,
+            sessionId,
+            agentResponse.previewData,
+            agentResponse.context,
+          );
+          itineraryId = itinerary.id;
+          this.logger.log(`Saved preview itinerary ${itinerary.id} for session ${sessionId}`);
+
+          // Update the assistant message metadata with the itinerary ID so it survives re-fetches
+          await this.prisma.aiChatMessage.update({
+            where: { id: assistantMsgId },
+            data: { metadata: { tokenCount: agentResponse.tokenCount, hasPreview: true, itineraryId: itinerary.id } },
+          });
+        } catch (err: any) {
+          this.logger.error(`Failed to save preview: ${err.message}`);
+        }
       }
     }
 
@@ -186,8 +257,56 @@ export class ChatService {
       context: agentResponse.context,
       previewData: agentResponse.previewData || undefined,
       itineraryId,
+      pendingPreviewExpansion,
       isComplete: false,
     };
+  }
+
+  private async expandCompactPreviewToFull(args: {
+    userId: number;
+    sessionId: number;
+    assistantMsgId: number;
+    userMessage: string;
+    history: Content[];
+    sessionContext: Record<string, any>;
+    tokenCount?: number;
+  }) {
+    const { userId, sessionId, assistantMsgId, userMessage, history, sessionContext } = args;
+
+    const full = await this.itineraryAgent.expandToFullPreview(
+      userMessage,
+      history,
+      sessionContext,
+    );
+
+    if (!full?.previewData) return;
+
+    // Save full preview as itinerary so frontend can recover previewData on refetch
+    const itinerary = await this.itineraryService.createFromPreview(
+      userId,
+      sessionId,
+      full.previewData,
+      full.context,
+    );
+
+    // Update assistant message to the full text and attach itineraryId
+    await this.prisma.aiChatMessage.update({
+      where: { id: assistantMsgId },
+      data: {
+        content: full.text,
+        metadata: { tokenCount: full.tokenCount, hasPreview: true, itineraryId: itinerary.id, previewPhase: 'full' },
+        token_count: full.tokenCount || undefined,
+      },
+    });
+
+    // Update session context
+    await this.prisma.aiChatSession.update({
+      where: { id: sessionId },
+      data: {
+        slots: full.context,
+        ...(full.context?.destination ? { title: `Trip to ${full.context.destination}` } : {}),
+      },
+    });
   }
 
   /**
@@ -336,51 +455,22 @@ export class ChatService {
    * Enforces strict user/model alternation starting with 'user'.
    */
   private async loadConversationHistory(sessionId: number): Promise<Content[]> {
-    const totalCount = await this.prisma.aiChatMessage.count({
+    let rawMessages: { role: string; content: string; metadata?: any }[];
+
+    const allMessages = await this.prisma.aiChatMessage.findMany({
       where: { session_id: sessionId },
+      orderBy: { created_at: 'asc' },
+      select: { role: true, content: true, metadata: true },
     });
 
-    let rawMessages: { role: string; content: string }[];
-
-    if (totalCount <= this.MAX_HISTORY_MESSAGES) {
-      rawMessages = await this.prisma.aiChatMessage.findMany({
-        where: { session_id: sessionId },
-        orderBy: { created_at: 'asc' },
-        select: { role: true, content: true },
-      });
-    } else {
-      // Long conversation: summarize older, keep recent verbatim
-      const recentCount = Math.floor(this.MAX_HISTORY_MESSAGES * 0.6);
-      const olderMessages = await this.prisma.aiChatMessage.findMany({
-        where: { session_id: sessionId },
-        orderBy: { created_at: 'asc' },
-        take: totalCount - recentCount,
-        select: { role: true, content: true },
-      });
-
-      const recentMessages = await this.prisma.aiChatMessage.findMany({
-        where: { session_id: sessionId },
-        orderBy: { created_at: 'desc' },
-        take: recentCount,
-        select: { role: true, content: true },
-      });
-
-      const olderText = olderMessages
-        .filter((m) => m.role !== 'system')
-        .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.slice(0, 200)}`)
-        .join('\n');
-
-      const summaryMsg = {
-        role: 'user',
-        content: `[Previous conversation summary]\n${olderText.slice(0, 1500)}\n[End summary]`,
-      };
-
-      rawMessages = [summaryMsg, ...recentMessages.reverse()];
-    }
+    rawMessages = this.compactHistoryToTokenBudget(allMessages);
 
     // Map roles and enforce Gemini alternation
     const mapped = rawMessages
       .filter((m) => m.role !== 'system')
+      // Do not feed transient error messages back into the model;
+      // otherwise one 503/overload can "poison" the session context.
+      .filter((m) => !(m.role === 'assistant' && (m.metadata as any)?.isError))
       .map((m) => ({
         role: (m.role === 'user' ? 'user' : 'model') as 'user' | 'model',
         text: m.content,
@@ -407,6 +497,83 @@ export class ChatService {
       role: m.role,
       parts: [{ text: m.text }],
     }));
+  }
+
+  /**
+   * Preserve any corrected request details from the current user message even when Gemini fails.
+   * This prevents a stale 12-day request from permanently poisoning the session after a retryable error.
+   */
+  private recoverContextFromMessage(
+    message: string,
+    sessionContext: Record<string, any>,
+    agentType: AiAgentType,
+  ): Record<string, any> {
+    const context = { ...sessionContext };
+
+    if (agentType === AiAgentType.ITINERARY_GENERATOR) {
+      const days = this.extractRequestedDays(message);
+      if (days) {
+        context.requestedDays = days;
+      }
+    }
+
+    return context;
+  }
+
+  private extractRequestedDays(message: string): number | null {
+    const text = (message || '').toLowerCase();
+    const match =
+      text.match(/(?:for\s*)?(\d{1,2})\s*[- ]?\s*(day|days|night|nights)\b/) ||
+      text.match(/\b(\d{1,2})\s*[- ]?\s*day\b/);
+
+    if (!match) return null;
+
+    const days = Number(match[1]);
+    return Number.isFinite(days) && days > 0 ? days : null;
+  }
+
+  /**
+   * Compact the conversation to a rough token budget before Gemini sees it.
+   * Keeps recent turns intact and summarizes older content into a short memory block.
+   */
+  private compactHistoryToTokenBudget(messages: { role: string; content: string; metadata?: any }[]) {
+    const estimateTokens = (text: string) => Math.ceil((text || '').length / 4);
+    const recentKeep: typeof messages = [];
+    let tokenTotal = 0;
+
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (message.role === 'system') continue;
+      if (message.role === 'assistant' && (message.metadata as any)?.isError) continue;
+
+      const cost = estimateTokens(message.content);
+      const isRecentUserTurn = recentKeep.length < 6;
+      if (tokenTotal + cost > this.MAX_HISTORY_TOKENS && !isRecentUserTurn) {
+        break;
+      }
+
+      recentKeep.unshift(message);
+      tokenTotal += cost;
+    }
+
+    if (recentKeep.length >= messages.length) {
+      return recentKeep;
+    }
+
+    const olderMessages = messages.slice(0, Math.max(0, messages.length - recentKeep.length));
+    const olderText = olderMessages
+      .filter((m) => m.role !== 'system')
+      .filter((m) => !(m.role === 'assistant' && (m.metadata as any)?.isError))
+      .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.slice(0, 160)}`)
+      .join('\n');
+
+    const summaryMsg = {
+      role: 'user',
+      content: `[Conversation summary]\n${olderText.slice(0, 1800)}\n[End summary]`,
+      metadata: undefined,
+    };
+
+    return [summaryMsg, ...recentKeep];
   }
 
   /**
