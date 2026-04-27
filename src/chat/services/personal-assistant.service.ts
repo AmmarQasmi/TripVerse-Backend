@@ -36,7 +36,7 @@ export class PersonalAssistantService {
     // 1. Try to detect destination from user message (if not already known)
     const context = { ...sessionContext };
     if (!context.destination) {
-      const extracted = await this.extractDestination(userMessage);
+      const extracted = this.extractDestinationLocal(userMessage) || await this.extractDestination(userMessage);
       if (extracted) {
         context.destination = extracted;
         this.logger.log(`Destination detected: ${extracted}`);
@@ -104,6 +104,21 @@ export class PersonalAssistantService {
     } catch {
       return null;
     }
+  }
+
+  private extractDestinationLocal(message: string): string | null {
+    const text = (message || '').trim();
+    if (!text) return null;
+
+    // Common patterns: "going to Paris", "trip to Tokyo", "in Dubai", "visit Istanbul"
+    const m =
+      text.match(/\b(?:to|in|visit|visiting|going to|travel to|trip to)\s+([A-Za-z][A-Za-z\s.'-]{1,60})\b/i);
+    if (!m) return null;
+
+    const candidate = m[1].trim();
+    // avoid absurdly short/long captures
+    if (candidate.length < 2 || candidate.length > 60) return null;
+    return candidate;
   }
 
   /**
