@@ -2357,6 +2357,8 @@ export class AdminService {
 	 */
 	async getAllUsers(query: any = {}) {
 		const { page = 1, limit = 20, role, status, city_id } = query;
+		const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
+		const parsedLimit = Math.max(parseInt(limit, 10) || 20, 1);
 
 		const where: any = {};
 
@@ -2385,8 +2387,8 @@ export class AdminService {
 					},
 				},
 				orderBy: { created_at: 'desc' },
-				skip: (page - 1) * limit,
-				take: limit,
+				skip: (parsedPage - 1) * parsedLimit,
+				take: parsedLimit,
 			}),
 			this.prisma.user.count({ where }),
 		]);
@@ -2402,10 +2404,10 @@ export class AdminService {
 				created_at: user.created_at.toISOString(),
 			})),
 			pagination: {
-				page,
-				limit,
+				page: parsedPage,
+				limit: parsedLimit,
 				total,
-				total_pages: Math.ceil(total / limit),
+				total_pages: Math.ceil(total / parsedLimit),
 			},
 		};
 	}
@@ -2415,6 +2417,8 @@ export class AdminService {
 	 */
 	async getAllHotels(query: any = {}) {
 		const { page = 1, limit = 20, city_id, is_listed, is_active, manager_id } = query;
+		const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
+		const parsedLimit = Math.max(parseInt(limit, 10) || 20, 1);
 
 		const where: any = {};
 
@@ -2470,8 +2474,8 @@ export class AdminService {
 					},
 				},
 				orderBy: { created_at: 'desc' },
-				skip: (page - 1) * limit,
-				take: limit,
+				skip: (parsedPage - 1) * parsedLimit,
+				take: parsedLimit,
 			}),
 			this.prisma.hotel.count({ where }),
 		]);
@@ -2506,10 +2510,10 @@ export class AdminService {
 				};
 			}),
 			pagination: {
-				page: parseInt(page),
-				limit: parseInt(limit),
+				page: parsedPage,
+				limit: parsedLimit,
 				total,
-				total_pages: Math.ceil(total / limit),
+				total_pages: Math.ceil(total / parsedLimit),
 			},
 		};
 	}
@@ -2653,6 +2657,8 @@ export class AdminService {
 	 */
 	async getAllHotelManagers(query: any = {}) {
 		const { page = 1, limit = 20, is_verified, city_id } = query;
+		const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
+		const parsedLimit = Math.max(parseInt(limit, 10) || 20, 1);
 
 		const where: any = {};
 
@@ -2692,8 +2698,8 @@ export class AdminService {
 					},
 				},
 				orderBy: { created_at: 'desc' },
-				skip: (page - 1) * limit,
-				take: limit,
+				skip: (parsedPage - 1) * parsedLimit,
+				take: parsedLimit,
 			}),
 			this.prisma.hotelManager.count({ where }),
 		]);
@@ -2718,10 +2724,10 @@ export class AdminService {
 				created_at: manager.created_at.toISOString(),
 			})),
 			pagination: {
-				page: parseInt(page),
-				limit: parseInt(limit),
+				page: parsedPage,
+				limit: parsedLimit,
 				total,
-				total_pages: Math.ceil(total / limit),
+				total_pages: Math.ceil(total / parsedLimit),
 			},
 		};
 	}
